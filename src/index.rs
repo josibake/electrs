@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
+use bitcoin::hashes::Hash;
+use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
@@ -173,16 +175,20 @@ impl Index {
         daemon: &Daemon,
         exit_flag: &ExitFlag,
     ) -> Result<bool> {
-        let mut new_headers: Vec<NewHeader> = Vec::with_capacity(2000);
+        let mut new_headers: Vec<NewHeader> = Vec::with_capacity(200);
         let start: usize;
         if let Some(row) = self.store.last_sp() {
             let blockhash: BlockHash = deserialize(&row).expect("invalid block_hash");
-            start = self.chain.get_block_height(&blockhash).expect("Can't find block_hash") + 1;
+            start = self
+                .chain
+                .get_block_height(&blockhash)
+                .expect("Can't find block_hash")
+                + 1;
         } else {
             start = 70_000;
         }
-        let end = if start + 2000 < self.chain.height() {
-            start + 2000
+        let end = if start + 200 < self.chain.height() {
+            start + 200
         } else {
             self.chain.height()
         };
@@ -225,6 +231,81 @@ impl Index {
         }
         self.flush_needed = true;
         Ok(false) // sync is not done
+    }
+
+    pub(crate) fn get_tweaks(
+        &self,
+        height: usize,
+    ) -> impl Iterator<Item = serde_json::Map<String, serde_json::Value>> + '_ {
+        self.store
+            .read_tweaks(height as u64)
+            .into_iter()
+            .filter_map(move |(block_height, data)| {
+                if !data.is_empty()
+                    && block_height.to_vec()
+                        == u64::try_from(height)
+                            .expect("Unexpected invalid usize")
+                            .to_be_bytes()
+                            .to_vec()
+                {
+                    let mut map = serde_json::Map::new();
+
+                    let mut chunk = 0;
+
+                    while data.len() > chunk {
+                        let mut obj = serde_json::Map::new();
+
+                        let mut txid = [0u8; 32];
+                        txid.copy_from_slice(&data[chunk..chunk + 32]);
+                        chunk += 32;
+                        txid.reverse();
+
+                        let mut tweak = [0u8; 33];
+                        tweak.copy_from_slice(&data[chunk..chunk + 33]);
+                        chunk += 33;
+                        obj.insert(
+                            "tweak".to_string(),
+                            serde_json::Value::String(tweak.as_hex().to_string()),
+                        );
+
+                        let mut output_pubkeys_len = [0u8; 8];
+                        output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
+                        chunk += 8;
+                        let output_pubkeys_len = u64::from_be_bytes(output_pubkeys_len);
+                        data[chunk..]
+                            .chunks(output_pubkeys_len as usize)
+                            .next()?
+                            .chunks(34)
+                            .for_each(|pubkey| {
+                                chunk += 34;
+
+                                if let Some(value) = obj.get_mut("output_pubkeys") {
+                                    // Add to array item
+                                    let array = value.as_array_mut().unwrap();
+                                    array.push(serde_json::Value::String(
+                                        pubkey.as_hex().to_string(),
+                                    ));
+                                } else {
+                                    obj.insert(
+                                        "output_pubkeys".to_string(),
+                                        serde_json::Value::Array(Vec::from([
+                                            serde_json::Value::String(pubkey.as_hex().to_string()),
+                                        ])),
+                                    );
+                                }
+                            });
+
+                        map.insert(
+                            Txid::from_byte_array(txid).to_string(),
+                            serde_json::Value::Object(obj),
+                        );
+                    }
+
+                    Some(map)
+                } else {
+                    None
+                }
+            })
     }
 
     // Return `Ok(true)` when the chain is fully synced and the index is compacted.
@@ -282,11 +363,7 @@ impl Index {
                 let height = heights.next().expect("unexpected block");
                 self.stats.observe_duration("block_sp", || {
                     scan_single_block_for_silent_payments(
-                        self,
-                        daemon,
-                        blockhash,
-                        block,
-                        &mut batch,
+                        self, daemon, blockhash, block, &mut batch,
                     );
                 });
                 self.stats.height.set("sp", height as f64);
@@ -383,7 +460,7 @@ fn scan_single_block_for_silent_payments(
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         index: &'a Index,
-        map: &'a mut HashMap<BlockHash, Vec<u8>>,
+        map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -393,31 +470,21 @@ fn scan_single_block_for_silent_payments(
                 Err(_) => panic!("Unexpected invalid transaction"),
             };
 
-            if parsed_tx.is_coinbase() { return ControlFlow::Continue(()) };
+            if parsed_tx.is_coinbase() {
+                return ControlFlow::Continue(());
+            };
 
             let txid = bsl_txid(tx);
 
-            let mut to_scan = false;
-            for (i, o) in parsed_tx.output.iter().enumerate() {
+            let mut output_pubkeys: Vec<Vec<u8>> = Vec::with_capacity(parsed_tx.output.len());
+
+            for (_, o) in parsed_tx.output.iter().enumerate() {
                 if o.script_pubkey.is_p2tr() {
-                    let outpoint = OutPoint {
-                        txid,
-                        vout: i.try_into().expect("Unexpectedly high vout"),
-                    };
-                    if self
-                        .index
-                        .store
-                        .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
-                        .next()
-                        .is_none()
-                    {
-                        to_scan = true;
-                        break; // Stop iterating once a relevant P2TR output is found
-                    }
+                    output_pubkeys.push(o.script_pubkey.to_bytes());
                 }
             }
 
-            if !to_scan {
+            if output_pubkeys.is_empty() {
                 return ControlFlow::Continue(());
             }
 
@@ -454,14 +521,23 @@ fn scan_single_block_for_silent_payments(
             let pubkeys_ref: Vec<&PublicKey> = pubkeys.iter().collect();
 
             if !pubkeys_ref.is_empty() {
-                let tweak = recipient_calculate_tweak_data(&pubkeys_ref, &outpoints).expect("Unexpected invalid transaction");
+                let tweak = recipient_calculate_tweak_data(&pubkeys_ref, &outpoints)
+                    .expect("Unexpected invalid transaction");
 
                 // check in which block is this transaction
                 if let Some(block_hash) = self.index.filter_by_txid(txid).next() {
+                    let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
+                    obj.insert("tweak".to_string(), Vec::from_iter(tweak.serialize()));
+                    obj.insert(
+                        "output_pubkeys".to_string(),
+                        output_pubkeys.into_iter().flatten().collect(),
+                    );
+
                     if let Some(value) = self.map.get_mut(&block_hash) {
-                        value.extend(&tweak.serialize());
+                        value.insert(txid, obj);
                     } else {
-                        self.map.insert(block_hash, Vec::from_iter(tweak.serialize())); 
+                        self.map
+                            .insert(block_hash, HashMap::from_iter([(txid, obj)]));
                     }
                 } else {
                     panic!("Unexpected unknown transaction");
@@ -472,17 +548,36 @@ fn scan_single_block_for_silent_payments(
         }
     }
 
-    let mut map: HashMap<BlockHash, Vec<u8>> = HashMap::with_capacity(index.batch_size);
+    let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
+        HashMap::with_capacity(index.batch_size);
     let mut index_block = IndexBlockVisitor {
         daemon,
         index,
-        map: &mut map
+        map: &mut map,
     };
     bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
-    for (hash, tweaks) in map {
-        let height = index.chain.get_block_height(&hash).expect("Unexpected non existing blockhash");
-        let mut value: Vec<u8> = u64::try_from(height).expect("Unexpected invalid usize").to_be_bytes().to_vec();
-        value.extend(tweaks.iter());
+    for (hash, tweaks_by_txid) in map {
+        let height = index
+            .chain
+            .get_block_height(&hash)
+            .expect("Unexpected non existing blockhash");
+
+        let mut value: Vec<u8> = u64::try_from(height)
+            .expect("Unexpected invalid usize")
+            .to_be_bytes()
+            .to_vec();
+
+        for (txid, tweak_pubkey_obj) in tweaks_by_txid {
+            let mut txid_value = [0u8; 32];
+            txid_value.copy_from_slice(&txid[..]);
+            txid_value.reverse();
+
+            value.extend(txid_value);
+            value.extend(&tweak_pubkey_obj["tweak"]);
+            value.extend(&tweak_pubkey_obj["output_pubkeys"].len().to_be_bytes());
+            value.extend(&tweak_pubkey_obj["output_pubkeys"]);
+        }
+
         batch.tweak_rows.push(value.into_boxed_slice());
     }
     batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();

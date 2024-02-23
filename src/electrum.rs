@@ -389,6 +389,10 @@ impl Rpc {
         Ok(json!(self.daemon.get_transaction_hex(&txid, None)?))
     }
 
+    fn sp_tweaks_get(&self, (start_height,): (usize,)) -> Result<Value> {
+        Ok(json!(self.tracker.get_tweaks(start_height)?))
+    }
+
     fn transaction_get_merkle(&self, (txid, height): &(Txid, usize)) -> Result<Value> {
         let chain = self.tracker.chain();
         let blockhash = match chain.get_block_hash(*height) {
@@ -543,6 +547,7 @@ impl Rpc {
                 Params::Banner => Ok(json!(self.banner)),
                 Params::BlockHeader(args) => self.block_header(*args),
                 Params::BlockHeaders(args) => self.block_headers(*args),
+                Params::SpTweaks(args) => self.sp_tweaks_get(*args),
                 Params::Donation => Ok(Value::Null),
                 Params::EstimateFee(args) => self.estimate_fee(*args),
                 Params::Features => self.features(),
@@ -572,6 +577,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
+    SpTweaks((usize,)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),
@@ -597,6 +603,7 @@ impl Params {
         Ok(match method {
             "blockchain.block.header" => Params::BlockHeader(convert(params)?),
             "blockchain.block.headers" => Params::BlockHeaders(convert(params)?),
+            "blockchain.block.tweaks" => Params::SpTweaks(convert(params)?),
             "blockchain.estimatefee" => Params::EstimateFee(convert(params)?),
             "blockchain.headers.subscribe" => Params::HeadersSubscribe,
             "blockchain.relayfee" => Params::RelayFee,

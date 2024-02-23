@@ -282,6 +282,16 @@ impl DBStore {
             .expect("last_sp failed")
     }
 
+    pub(crate) fn read_tweaks(&self, height: u64) -> Vec<(Row, Row)> {
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_lower_bound(height.to_be_bytes());
+        opts.fill_cache(false);
+        self.db
+            .iterator_cf_opt(self.tweak_cf(), opts, rocksdb::IteratorMode::Start)
+            .map(|row| row.expect("tweak iterator failed"))
+            .collect()
+    }
+
     pub(crate) fn write(&self, batch: &WriteBatch) {
         let mut db_batch = rocksdb::WriteBatch::default();
         for key in &batch.funding_rows {
@@ -303,11 +313,7 @@ impl DBStore {
         // Only for silent payments tweak sync
         for key in &batch.tweak_rows {
             if key.len() > 8 {
-                db_batch.put_cf(
-                    self.tweak_cf(),
-                    &key[..8],
-                    &key[8..],
-                );
+                db_batch.put_cf(self.tweak_cf(), &key[..8], &key[8..]);
             }
         }
         if !batch.sp_tip_row.is_empty() {
