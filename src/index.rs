@@ -232,11 +232,14 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    pub(crate) fn get_tweaks(&self, height: usize) -> impl Iterator<Item = serde_json::Value> + '_ {
-        self.store
+    pub(crate) fn get_tweaks(&self, height: usize) -> serde_json::Value {
+        let mut array = Vec::from([]);
+
+        let _: Vec<_> = self
+            .store
             .read_tweaks(height as u64)
             .into_iter()
-            .filter_map(move |(block_height, data)| {
+            .filter_map(|(block_height, data)| {
                 if !data.is_empty()
                     && block_height.to_vec()
                         == u64::try_from(height)
@@ -244,8 +247,6 @@ impl Index {
                             .to_be_bytes()
                             .to_vec()
                 {
-                    let mut array = serde_json::Value::Array(Vec::from([]));
-
                     let mut chunk = 0;
 
                     while data.len() > chunk {
@@ -286,17 +287,17 @@ impl Index {
                                 }
                             });
 
-                        array
-                            .as_array_mut()
-                            .unwrap()
-                            .push(serde_json::Value::Object(obj));
+                        array.push(serde_json::Value::Object(obj));
                     }
 
-                    Some(array)
+                    Some(())
                 } else {
                     None
                 }
             })
+            .collect();
+
+        serde_json::Value::Array(array)
     }
 
     // Return `Ok(true)` when the chain is fully synced and the index is compacted.

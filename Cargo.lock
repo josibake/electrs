@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "silentpayments"
 version = "0.1.0"
-source = "git+https://github.com/Sosthene00/rust-silentpayments?branch=master#b6610f5fccf88e78d4dd8fde6dc45beb30b9637c"
+source = "git+https://github.com/cake-tech/rust-silentpayments?branch=master#b455dd714ec43b85d4a9e948f714129b5b82f3ae"
 dependencies = [
  "bech32 0.9.1",
  "bimap",
