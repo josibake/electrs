@@ -126,12 +126,7 @@ impl Tracker {
         Ok(result)
     }
 
-    pub(crate) fn get_tweaks(
-        &self,
-        height: usize,
-    ) -> Result<serde_json::Map<String, serde_json::Value>> {
-        let tweaks: Vec<serde_json::Map<String, serde_json::Value>> =
-            self.index.get_tweaks(height).collect();
-        Ok(tweaks.into_iter().flatten().collect())
+    pub(crate) fn get_tweaks(&self, height: usize) -> Result<serde_json::Value> {
+        Ok(self.index.get_tweaks(height).collect())
     }
 }

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
-use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
@@ -233,10 +232,7 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    pub(crate) fn get_tweaks(
-        &self,
-        height: usize,
-    ) -> impl Iterator<Item = serde_json::Map<String, serde_json::Value>> + '_ {
+    pub(crate) fn get_tweaks(&self, height: usize) -> impl Iterator<Item = serde_json::Value> + '_ {
         self.store
             .read_tweaks(height as u64)
             .into_iter()
@@ -248,17 +244,12 @@ impl Index {
                             .to_be_bytes()
                             .to_vec()
                 {
-                    let mut map = serde_json::Map::new();
+                    let mut array = serde_json::Value::Array(Vec::from([]));
 
                     let mut chunk = 0;
 
                     while data.len() > chunk {
                         let mut obj = serde_json::Map::new();
-
-                        let mut txid = [0u8; 32];
-                        txid.copy_from_slice(&data[chunk..chunk + 32]);
-                        chunk += 32;
-                        txid.reverse();
 
                         let mut tweak = [0u8; 33];
                         tweak.copy_from_slice(&data[chunk..chunk + 33]);
@@ -295,13 +286,13 @@ impl Index {
                                 }
                             });
 
-                        map.insert(
-                            Txid::from_byte_array(txid).to_string(),
-                            serde_json::Value::Object(obj),
-                        );
+                        array
+                            .as_array_mut()
+                            .unwrap()
+                            .push(serde_json::Value::Object(obj));
                     }
 
-                    Some(map)
+                    Some(array)
                 } else {
                     None
                 }
@@ -460,7 +451,7 @@ fn scan_single_block_for_silent_payments(
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         index: &'a Index,
-        map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
+        map: &'a mut HashMap<BlockHash, Vec<HashMap<String, Vec<u8>>>>,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -534,10 +525,9 @@ fn scan_single_block_for_silent_payments(
                     );
 
                     if let Some(value) = self.map.get_mut(&block_hash) {
-                        value.insert(txid, obj);
+                        value.push(obj);
                     } else {
-                        self.map
-                            .insert(block_hash, HashMap::from_iter([(txid, obj)]));
+                        self.map.insert(block_hash, Vec::from([obj]));
                     }
                 } else {
                     panic!("Unexpected unknown transaction");
@@ -548,7 +538,7 @@ fn scan_single_block_for_silent_payments(
         }
     }
 
-    let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
+    let mut map: HashMap<BlockHash, Vec<HashMap<String, Vec<u8>>>> =
         HashMap::with_capacity(index.batch_size);
     let mut index_block = IndexBlockVisitor {
         daemon,
@@ -556,7 +546,7 @@ fn scan_single_block_for_silent_payments(
         map: &mut map,
     };
     bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
-    for (hash, tweaks_by_txid) in map {
+    for (hash, tweaks) in map {
         let height = index
             .chain
             .get_block_height(&hash)
@@ -567,12 +557,7 @@ fn scan_single_block_for_silent_payments(
             .to_be_bytes()
             .to_vec();
 
-        for (txid, tweak_pubkey_obj) in tweaks_by_txid {
-            let mut txid_value = [0u8; 32];
-            txid_value.copy_from_slice(&txid[..]);
-            txid_value.reverse();
-
-            value.extend(txid_value);
+        for tweak_pubkey_obj in tweaks {
             value.extend(&tweak_pubkey_obj["tweak"]);
             value.extend(&tweak_pubkey_obj["output_pubkeys"].len().to_be_bytes());
             value.extend(&tweak_pubkey_obj["output_pubkeys"]);
