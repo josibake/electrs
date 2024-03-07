@@ -177,12 +177,15 @@ impl Index {
     ) -> Result<bool> {
         let mut new_headers: Vec<NewHeader> = Vec::with_capacity(200);
         let start: usize;
-        let mut existing_script_pubkeys_by_tweak: HashMap<String, Vec<String>> = HashMap::new();
+        let mut existing_script_pubkeys_by_tweak: HashMap<
+            String,
+            serde_json::Map<String, serde_json::Value>,
+        > = HashMap::new();
         let _: Vec<_> = self
             .store
             .read_all_tweaks()
             .into_iter()
-            .filter_map(|(_block_height, data)| {
+            .filter_map(|(_, data)| {
                 if !data.is_empty() {
                     let mut chunk = 0;
 
@@ -216,19 +219,28 @@ impl Index {
                                 let mut vout = [0u8; 4];
                                 vout.copy_from_slice(&pubkey[..4]);
 
-                                let pubkey_hex = pubkey[4 + 2..].as_hex().to_string();
+                                let pubkey_hex =
+                                    serde_json::Value::String(pubkey[4..].as_hex().to_string());
 
-                                if let Some(value) = existing_script_pubkeys_by_tweak
-                                    .get_mut(&tweak.as_hex().to_string())
-                                {
-                                    value.push(pubkey_hex);
+                                if let Some(value) = obj.get_mut("output_pubkeys") {
+                                    let vout_map =
+                                        value.as_object_mut().expect("unexpected non object value");
+                                    vout_map
+                                        .insert(u32::from_be_bytes(vout).to_string(), pubkey_hex);
                                 } else {
-                                    existing_script_pubkeys_by_tweak.insert(
-                                        tweak.as_hex().to_string(),
-                                        Vec::from([pubkey_hex]),
+                                    let mut vout_map = serde_json::Map::new();
+                                    vout_map
+                                        .insert(u32::from_be_bytes(vout).to_string(), pubkey_hex);
+
+                                    obj.insert(
+                                        "output_pubkeys".to_string(),
+                                        serde_json::Value::Object(vout_map),
                                     );
                                 }
                             });
+
+                        existing_script_pubkeys_by_tweak
+                            .insert(Txid::from_byte_array(txid).to_string(), obj);
                     }
 
                     Some(())
@@ -306,7 +318,7 @@ impl Index {
             .store
             .read_tweaks(height as u64, count as u64)
             .into_iter()
-            .filter_map(|(_block_height, data)| {
+            .filter_map(|(_, data)| {
                 if !data.is_empty() {
                     let mut chunk = 0;
 
@@ -415,7 +427,9 @@ impl Index {
         daemon: &Daemon,
         chunk: &[NewHeader],
         sp: bool,
-        existing_script_pubkeys_by_tweak: Option<&mut HashMap<String, Vec<String>>>,
+        existing_script_pubkeys_by_tweak: Option<
+            &mut HashMap<String, serde_json::Map<String, serde_json::Value>>,
+        >,
     ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
@@ -537,13 +551,17 @@ fn scan_single_block_for_silent_payments(
     block_hash: BlockHash,
     block: SerBlock,
     batch: &mut WriteBatch,
-    existing_script_pubkeys_by_tweak: &mut HashMap<String, Vec<String>>,
+    existing_script_pubkeys_by_tweak: &mut HashMap<
+        String,
+        serde_json::Map<String, serde_json::Value>,
+    >,
 ) {
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         index: &'a Index,
         map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
-        existing_script_pubkeys_by_tweak: &'a mut HashMap<String, Vec<String>>,
+        existing_script_pubkeys_by_tweak:
+            &'a mut HashMap<String, serde_json::Map<String, serde_json::Value>>,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -605,9 +623,23 @@ fn scan_single_block_for_silent_payments(
                     .expect("Spending a non existent UTXO");
 
                 let mut should_scan = true;
-                for (_, script_pubkeys) in self.existing_script_pubkeys_by_tweak.iter() {
-                    if script_pubkeys.contains(&prevout.script_pubkey.to_hex_string()) {
-                        should_scan = false;
+                if prevout.script_pubkey.is_p2tr() {
+                    if let Some(tx) = self
+                        .existing_script_pubkeys_by_tweak
+                        .get_mut(&i.previous_output.txid.to_string())
+                    {
+                        for (vout, pubkey) in tx["output_pubkeys"]
+                            .as_object()
+                            .expect("unexpected non object value")
+                            .to_owned()
+                        {
+                            if vout == i.previous_output.vout.to_string()
+                                && pubkey == prevout.script_pubkey.to_hex_string()
+                            {
+                                // delete outpoint if it is being spent
+                                should_scan = false;
+                            }
+                        }
                     }
                 }
 
