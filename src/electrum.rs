@@ -389,8 +389,8 @@ impl Rpc {
         Ok(json!(self.daemon.get_transaction_hex(&txid, None)?))
     }
 
-    fn sp_tweaks_get(&self, (start_height,): (usize,)) -> Result<Value> {
-        Ok(json!(self.tracker.get_tweaks(start_height)?))
+    fn sp_tweaks_get(&self, (start_height, count): (usize, usize)) -> Result<Value> {
+        Ok(json!(self.tracker.get_tweaks(start_height, count)?))
     }
 
     fn transaction_get_merkle(&self, (txid, height): &(Txid, usize)) -> Result<Value> {
@@ -577,7 +577,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
-    SpTweaks((usize,)),
+    SpTweaks((usize, usize)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),
