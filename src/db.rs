@@ -282,12 +282,11 @@ impl DBStore {
             .expect("last_sp failed")
     }
 
-    pub(crate) fn read_all_tweaks(&self) -> Vec<(Row, Row)> {
+    pub(crate) fn read_last_tweak(&self) -> Vec<(Row, Row)> {
         let mut opts = rocksdb::ReadOptions::default();
         opts.fill_cache(false);
-        opts.set_iterate_lower_bound(u64::to_be_bytes(0));
         self.db
-            .iterator_cf_opt(self.tweak_cf(), opts, rocksdb::IteratorMode::Start)
+            .iterator_cf_opt(self.tweak_cf(), opts, rocksdb::IteratorMode::End)
             .map(|row| row.expect("tweak iterator failed"))
             .collect()
     }
