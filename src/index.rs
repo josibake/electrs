@@ -218,7 +218,7 @@ impl Index {
         } else {
             self.chain.height()
         };
-        for block_height in start..end {
+        for block_height in start..end + 1 {
             match self.chain.get_block_header(block_height) {
                 Some(new_header) => {
                     new_headers.push(NewHeader::from((*new_header, block_height)));
@@ -265,7 +265,7 @@ impl Index {
             .store
             .read_tweaks(height as u64, count as u64)
             .into_iter()
-            .filter_map(|(_, data)| {
+            .filter_map(|(block_height_vec, data)| {
                 if !data.is_empty() {
                     let mut chunk = 0;
 
@@ -289,30 +289,48 @@ impl Index {
                         output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
                         chunk += 8;
 
+                        let chunk_size = 46;
+
                         data[chunk..]
                             .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
                             .next()?
-                            .chunks(38)
+                            .chunks(chunk_size)
                             .for_each(|pubkey| {
-                                chunk += 38;
+                                let mut pubkey_chunk = 0;
 
                                 let mut vout = [0u8; 4];
                                 vout.copy_from_slice(&pubkey[..4]);
+                                pubkey_chunk += 4;
 
-                                let pubkey_hex =
-                                    serde_json::Value::String(pubkey[4 + 2..].as_hex().to_string());
+                                let mut amount = [0u8; 8];
+                                amount.copy_from_slice(&pubkey[chunk..chunk + 8]);
+                                pubkey_chunk += 8;
+
+                                let pubkey_hex = serde_json::Value::String(
+                                    pubkey[chunk + 2..].as_hex().to_string(),
+                                );
+                                pubkey_chunk += 34;
+                                chunk += pubkey_chunk;
 
                                 if let Some(value) = obj.get_mut("output_pubkeys") {
                                     if let Some(vout_map) = value.as_object_mut() {
                                         vout_map.insert(
                                             u32::from_be_bytes(vout).to_string(),
-                                            pubkey_hex,
+                                            serde_json::json!({
+                                                "pubkey": pubkey_hex,
+                                                "amount": u64::from_be_bytes(amount).to_string()
+                                            }),
                                         );
                                     };
                                 } else {
                                     let mut vout_map = serde_json::Map::new();
-                                    vout_map
-                                        .insert(u32::from_be_bytes(vout).to_string(), pubkey_hex);
+                                    vout_map.insert(
+                                        u32::from_be_bytes(vout).to_string(),
+                                        serde_json::json!({
+                                            "pubkey": pubkey_hex,
+                                            "amount": u64::from_be_bytes(amount).to_string()
+                                        }),
+                                    );
 
                                     obj.insert(
                                         "output_pubkeys".to_string(),
@@ -321,10 +339,25 @@ impl Index {
                                 }
                             });
 
-                        map.insert(
-                            Txid::from_byte_array(txid).to_string(),
-                            serde_json::Value::Object(obj),
-                        );
+                        let mut height_value = [0u8; 8];
+                        height_value.copy_from_slice(&block_height_vec);
+                        let height = u64::from_be_bytes(height_value);
+
+                        if let Some(value) = map.get_mut(&height.to_string()) {
+                            if let Some(value_map) = value.as_object_mut() {
+                                value_map.insert(
+                                    Txid::from_byte_array(txid).to_string(),
+                                    serde_json::Value::Object(obj),
+                                );
+                            }
+                        } else {
+                            let mut new_map = serde_json::Map::new();
+                            new_map.insert(
+                                Txid::from_byte_array(txid).to_string(),
+                                serde_json::Value::Object(obj),
+                            );
+                            map.insert(height.to_string(), serde_json::Value::Object(new_map));
+                        }
                     }
 
                     Some(())
@@ -527,6 +560,7 @@ fn scan_single_block_for_silent_payments(
                                 .is_none()
                             {
                                 output_pubkeys.extend(outpoint.vout.to_be_bytes());
+                                output_pubkeys.extend(o.value.to_sat().to_be_bytes());
                                 output_pubkeys.extend(o.script_pubkey.to_bytes());
                             }
                         }
