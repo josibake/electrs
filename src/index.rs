@@ -303,11 +303,11 @@ impl Index {
                                 pubkey_chunk += 4;
 
                                 let mut amount = [0u8; 8];
-                                amount.copy_from_slice(&pubkey[chunk..chunk + 8]);
+                                amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
                                 pubkey_chunk += 8;
 
                                 let pubkey_hex = serde_json::Value::String(
-                                    pubkey[chunk + 2..].as_hex().to_string(),
+                                    pubkey[pubkey_chunk + 2..].as_hex().to_string(),
                                 );
                                 pubkey_chunk += 34;
                                 chunk += pubkey_chunk;
