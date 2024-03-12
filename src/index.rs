@@ -188,7 +188,7 @@ impl Index {
                     start = self
                         .chain
                         .get_block_height(&blockhash)
-                        .unwrap_or(70_000 - 1)
+                        .unwrap_or(2581656 - 1)
                         + 1;
                 }
                 Err(_) => {
@@ -201,17 +201,17 @@ impl Index {
                                 Ok(blockhash) => {
                                     self.chain
                                         .get_block_height(&blockhash)
-                                        .unwrap_or(70_000 - 1)
+                                        .unwrap_or(2581656 - 1)
                                         + 1
                                 }
-                                Err(_) => 70_000,
+                                Err(_) => 2581656,
                             })
                         })
                         .collect::<Vec<_>>()[0];
                 }
             };
         } else {
-            start = 70_000;
+            start = 2581656;
         }
         let end = if start + 200 < self.chain.height() {
             start + 200
