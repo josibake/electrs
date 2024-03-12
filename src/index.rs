@@ -587,130 +587,130 @@ fn scan_single_block_for_silent_payments(
                                     .expect("Unexpectedly high vout");
 
                                 if let Some(prevout) = prev_tx.output.get(index) {
-                                    if prevout.script_pubkey.is_p2tr() {
-                                        if let Some(block_hash) =
-                                            self.index.filter_by_txid(prev_txid).next()
-                                        {
-                                            if let Some(height) =
-                                                self.index.chain.get_block_height(&block_hash)
-                                            {
-                                                match serde_json::from_value::<
-                                                    HashMap<String, serde_json::Value>,
-                                                >(
-                                                    self.index.get_tweaks(height, 1)
-                                                ) {
-                                                    Ok(mut existing_script_pubkeys_by_tweak) => {
-                                                        match existing_script_pubkeys_by_tweak
-                                                            .get_mut(&prev_txid.to_string())
-                                                        {
-                                                            Some(tx) => {
-                                                                let mut vout_pubkey_array: Vec<u8> =
-                                                                    Vec::new();
-                                                                match serde_json::from_value::<
-                                                                    HashMap<String, String>,
-                                                                >(
-                                                                    tx["output_pubkeys"].to_owned(),
-                                                                ) {
-                                                                    Ok(pubkeys_obj) => {
-                                                                        let mut should_add = false;
-
-                                                                        let _: Vec<_> = pubkeys_obj
-                                                                            .into_iter()
-                                                                            .map(
-                                                                                |(vout, pubkey)| {
-                                                                                    if vout
-                                                                        == i.previous_output
-                                                                            .vout
-                                                                            .to_string()
-                                                                        && pubkey
-                                                                            == prevout
-                                                                                .script_pubkey
-                                                                                .to_hex_string()
-                                                                    {
-                                                                        println!(
-                                                        "found a matching spend {:?}, {:?}, {:?}",
-                                                        vout, pubkey, txid
-                                                    );
-
-                                                                        should_add = true;
-                                                                    } else {
-                                                                        let outpoint = OutPoint {
-                                                                            txid,
-                                                                            vout: i
-                                                                                .previous_output
-                                                                                .vout,
-                                                                        };
-                                                                        let mut vout_array =
-                                                                            [0u8; 4];
-                                                                        vout_array.copy_from_slice(
-                                                                            &outpoint
-                                                                                .vout
-                                                                                .to_be_bytes(),
-                                                                        );
-                                                                        vout_pubkey_array
-                                                                            .extend(vout_array);
-
-                                                                        vout_pubkey_array.extend(
-                                                                            pubkey.as_bytes(),
-                                                                        );
-
-                                                                        should_add = false;
-                                                                    }
-                                                                                },
-                                                                            )
-                                                                            .collect();
-
-                                                                        if should_add {
-                                                                            let mut value: Vec<u8> =
-                                                                                height
-                                                                                    .to_be_bytes()
-                                                                                    .to_vec();
-
-                                                                            value.extend(
-                                                                                prev_txid
-                                                                                    .to_byte_array(
-                                                                                    ),
-                                                                            );
-
-                                                                            match
-                                                                        serde_json::from_value::<String>(
-                                                                            tx["tweak"].to_owned(),
-                                                                        )
-                                                                                            {
-                                                                                                Ok(tweak) => {
-                                                                            value.extend(
-                                                                                tweak.as_bytes(),
-                                                                            );
-
-                                                                            value.extend(
-                                                                                vout_pubkey_array
-                                                                                    .len()
-                                                                                    .to_be_bytes(),
-                                                                            );
-                                                                            value.extend(
-                                                                                vout_pubkey_array,
-                                                                            );
-                                                                            self.batch.tweak_rows.push(
-                                                                        value.into_boxed_slice(),
-                                                                    );
-                                                                                                },
-                                                                                                    Err(_)=> {}
-
-
-                                                                                            };
-                                                                        }
-                                                                    }
-                                                                    Err(_) => {}
-                                                                };
-                                                            }
-                                                            None => {}
-                                                        };
-                                                    }
-                                                    Err(_) => {}
-                                                }
-                                            };
-                                        }
-                                    }
+                                    // if prevout.script_pubkey.is_p2tr() {
+                                    //     if let Some(block_hash) =
+                                    //         self.index.filter_by_txid(prev_txid).next()
+                                    //     {
+                                    //         if let Some(height) =
+                                    //             self.index.chain.get_block_height(&block_hash)
+                                    //         {
+                                    //             match serde_json::from_value::<
+                                    //                 HashMap<String, serde_json::Value>,
+                                    //             >(
+                                    //                 self.index.get_tweaks(height, 1)
+                                    //             ) {
+                                    //                 Ok(mut existing_script_pubkeys_by_tweak) => {
+                                    //                     match existing_script_pubkeys_by_tweak
+                                    //                         .get_mut(&prev_txid.to_string())
+                                    //                     {
+                                    //                         Some(tx) => {
+                                    //                             let mut vout_pubkey_array: Vec<u8> =
+                                    //                                 Vec::new();
+                                    //                             match serde_json::from_value::<
+                                    //                                 HashMap<String, String>,
+                                    //                             >(
+                                    //                                 tx["output_pubkeys"].to_owned(),
+                                    //                             ) {
+                                    //                                 Ok(pubkeys_obj) => {
+                                    //                                     let mut should_add = false;
+                                    //
+                                    //                                     let _: Vec<_> = pubkeys_obj
+                                    //                                         .into_iter()
+                                    //                                         .map(
+                                    //                                             |(vout, pubkey)| {
+                                    //                                                 if vout
+                                    //                                     == i.previous_output
+                                    //                                         .vout
+                                    //                                         .to_string()
+                                    //                                     && pubkey
+                                    //                                         == prevout
+                                    //                                             .script_pubkey
+                                    //                                             .to_hex_string()
+                                    //                                 {
+                                    //                                     println!(
+                                    //                     "found a matching spend {:?}, {:?}, {:?}",
+                                    //                     vout, pubkey, txid
+                                    //                 );
+                                    //
+                                    //                                     should_add = true;
+                                    //                                 } else {
+                                    //                                     let outpoint = OutPoint {
+                                    //                                         txid,
+                                    //                                         vout: i
+                                    //                                             .previous_output
+                                    //                                             .vout,
+                                    //                                     };
+                                    //                                     let mut vout_array =
+                                    //                                         [0u8; 4];
+                                    //                                     vout_array.copy_from_slice(
+                                    //                                         &outpoint
+                                    //                                             .vout
+                                    //                                             .to_be_bytes(),
+                                    //                                     );
+                                    //                                     vout_pubkey_array
+                                    //                                         .extend(vout_array);
+                                    //
+                                    //                                     vout_pubkey_array.extend(
+                                    //                                         pubkey.as_bytes(),
+                                    //                                     );
+                                    //
+                                    //                                     should_add = false;
+                                    //                                 }
+                                    //                                             },
+                                    //                                         )
+                                    //                                         .collect();
+                                    //
+                                    //                                     if should_add {
+                                    //                                         let mut value: Vec<u8> =
+                                    //                                             height
+                                    //                                                 .to_be_bytes()
+                                    //                                                 .to_vec();
+                                    //
+                                    //                                         value.extend(
+                                    //                                             prev_txid
+                                    //                                                 .to_byte_array(
+                                    //                                                 ),
+                                    //                                         );
+                                    //
+                                    //                                         match
+                                    //                                     serde_json::from_value::<String>(
+                                    //                                         tx["tweak"].to_owned(),
+                                    //                                     )
+                                    //                                                         {
+                                    //                                                             Ok(tweak) => {
+                                    //                                         value.extend(
+                                    //                                             tweak.as_bytes(),
+                                    //                                         );
+                                    //
+                                    //                                         value.extend(
+                                    //                                             vout_pubkey_array
+                                    //                                                 .len()
+                                    //                                                 .to_be_bytes(),
+                                    //                                         );
+                                    //                                         value.extend(
+                                    //                                             vout_pubkey_array,
+                                    //                                         );
+                                    //                                         self.batch.tweak_rows.push(
+                                    //                                     value.into_boxed_slice(),
+                                    //                                 );
+                                    //                                                             },
+                                    //                                                                 Err(_)=> {}
+                                    //
+                                    //
+                                    //                                                         };
+                                    //                                     }
+                                    //                                 }
+                                    //                                 Err(_) => {}
+                                    //                             };
+                                    //                         }
+                                    //                         None => {}
+                                    //                     };
+                                    //                 }
+                                    //                 Err(_) => {}
+                                    //             }
+                                    //         };
+                                    //     }
+                                    // }
 
                                     match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
                                         script_sig: i.script_sig.to_bytes(),
