@@ -323,6 +323,7 @@ impl DBStore {
         // Only for silent payments tweak sync
         for key in &batch.tweak_rows {
             if key.len() > 8 {
+                db_batch.delete_cf(self.tweak_cf(), &key[..8]);
                 db_batch.put_cf(self.tweak_cf(), &key[..8], &key[8..]);
             }
         }
