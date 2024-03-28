@@ -127,6 +127,8 @@ pub struct Rpc {
     signal: Signal,
     banner: String,
     port: u16,
+    sp_begin_height: Option<usize>,
+    sp_min_dust: Option<usize>,
 }
 
 impl Rpc {
@@ -151,6 +153,8 @@ impl Rpc {
             signal,
             banner: config.server_banner.clone(),
             port: config.electrum_rpc_addr.port(),
+            sp_begin_height: config.sp_begin_height,
+            sp_min_dust: config.sp_min_dust,
         })
     }
 
@@ -163,7 +167,12 @@ impl Rpc {
     }
 
     pub fn sync(&mut self) -> Result<bool> {
-        self.tracker.sync(&self.daemon, self.signal.exit_flag())
+        self.tracker.sync(
+            &self.daemon,
+            self.signal.exit_flag(),
+            self.sp_begin_height,
+            self.sp_min_dust,
+        )
     }
 
     pub fn update_client(&self, client: &mut Client) -> Result<Vec<String>> {
@@ -389,7 +398,8 @@ impl Rpc {
         Ok(json!(self.daemon.get_transaction_hex(&txid, None)?))
     }
 
-    fn sp_tweaks_get(&self, (start_height, count): (usize, usize)) -> Result<Value> {
+    fn sp_tweaks_get(&self, (start_height, count): (usize, Option<usize>)) -> Result<Value> {
+        let count = count.unwrap_or(1);
         Ok(json!(self.tracker.get_tweaks(start_height, count)?))
     }
 
@@ -577,7 +587,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
-    SpTweaks((usize, usize)),
+    SpTweaks((usize, Option<usize>)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),

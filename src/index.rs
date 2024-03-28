@@ -178,9 +178,15 @@ impl Index {
         &mut self,
         daemon: &Daemon,
         exit_flag: &ExitFlag,
+        sp_begin_height: Option<usize>,
+        sp_min_dust: Option<usize>,
     ) -> Result<bool> {
         let mut new_headers: Vec<NewHeader> = Vec::with_capacity(200);
         let start: usize;
+        let initial_height = sp_begin_height.unwrap_or(70_000);
+        let min_dust = sp_min_dust
+            .and_then(|dust| u64::try_from(dust).ok())
+            .unwrap_or(0);
 
         if let Some(row) = self.store.last_sp() {
             match deserialize::<BlockHash>(&row) {
@@ -188,7 +194,7 @@ impl Index {
                     start = self
                         .chain
                         .get_block_height(&blockhash)
-                        .unwrap_or(70_000 - 1)
+                        .unwrap_or(initial_height - 1)
                         + 1;
                 }
                 Err(_) => {
@@ -201,17 +207,17 @@ impl Index {
                                 Ok(blockhash) => {
                                     self.chain
                                         .get_block_height(&blockhash)
-                                        .unwrap_or(70_000 - 1)
+                                        .unwrap_or(initial_height - 1)
                                         + 1
                                 }
-                                Err(_) => 70_000,
+                                Err(_) => initial_height,
                             })
                         })
                         .collect::<Vec<_>>()[0];
                 }
             };
         } else {
-            start = 70_000;
+            start = initial_height;
         }
         let end = if start + 200 < self.chain.height() {
             start + 200
@@ -252,7 +258,7 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, true)?;
+            self.sync_blocks(daemon, chunk, true, min_dust)?;
         }
         self.flush_needed = true;
         Ok(false) // sync is not done
@@ -396,7 +402,7 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, false)?;
+            self.sync_blocks(daemon, chunk, false, 0)?;
         }
         self.chain.update(new_headers);
         self.stats.observe_chain(&self.chain);
@@ -404,7 +410,13 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    fn sync_blocks(&mut self, daemon: &Daemon, chunk: &[NewHeader], sp: bool) -> Result<()> {
+    fn sync_blocks(
+        &mut self,
+        daemon: &Daemon,
+        chunk: &[NewHeader],
+        sp: bool,
+        min_dust: u64,
+    ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
 
@@ -426,7 +438,7 @@ impl Index {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block_sp", || {
                         scan_single_block_for_silent_payments(
-                            self, daemon, blockhash, block, &mut batch,
+                            self, daemon, blockhash, block, &mut batch, min_dust,
                         );
                     });
                     self.stats.height.set("sp", height as f64);
@@ -526,12 +538,14 @@ fn scan_single_block_for_silent_payments(
     block_hash: BlockHash,
     block: SerBlock,
     batch: &mut WriteBatch,
+    min_dust: u64,
 ) {
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         index: &'a Index,
         map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
         batch: &'a mut WriteBatch,
+        min_dust: u64,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -547,7 +561,7 @@ fn scan_single_block_for_silent_payments(
                     let mut output_pubkeys: Vec<u8> = Vec::with_capacity(parsed_tx.output.len());
 
                     for (i, o) in parsed_tx.output.iter().enumerate() {
-                        if o.script_pubkey.is_p2tr() {
+                        if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
                             let outpoint = OutPoint {
                                 txid,
                                 vout: i.try_into().expect("Unexpectedly high vout"),
@@ -771,6 +785,7 @@ fn scan_single_block_for_silent_payments(
         index,
         map: &mut map,
         batch,
+        min_dust,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}

@@ -145,3 +145,13 @@ doc = "Logging filters, overriding `RUST_LOG` environment variable (see https://
 name = "signet_magic"
 type = "String"
 doc = "network magic for custom signet network in hex format, as found in Bitcoin Core logs (signet only)"
+
+[[param]]
+name = "sp_begin_height"
+type = "usize"
+doc = "Start height for Silent Payments indexing (default: 0)"
+
+[[param]]
+name = "sp_min_dust"
+type = "usize"
+doc = "Minimum dust value for Silent Payments indexing (default: 546)"

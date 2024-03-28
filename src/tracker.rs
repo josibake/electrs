@@ -71,10 +71,18 @@ impl Tracker {
         status.get_unspent(self.index.chain())
     }
 
-    pub(crate) fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) -> Result<bool> {
+    pub(crate) fn sync(
+        &mut self,
+        daemon: &Daemon,
+        exit_flag: &ExitFlag,
+        sp_begin_height: Option<usize>,
+        sp_min_dust: Option<usize>,
+    ) -> Result<bool> {
         let mut done = self.index.sync(daemon, exit_flag)?;
         if done {
-            done = self.index.silent_payments_sync(daemon, exit_flag)?;
+            done =
+                self.index
+                    .silent_payments_sync(daemon, exit_flag, sp_begin_height, sp_min_dust)?;
         }
         if done && !self.ignore_mempool {
             self.mempool.sync(daemon, exit_flag);

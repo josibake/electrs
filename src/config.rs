@@ -146,6 +146,8 @@ pub struct Config {
     pub disable_electrum_rpc: bool,
     pub server_banner: String,
     pub signet_magic: Magic,
+    pub sp_begin_height: Option<usize>,
+    pub sp_min_dust: Option<usize>,
     pub args: Vec<String>,
 }
 
@@ -354,6 +356,8 @@ impl Config {
             disable_electrum_rpc: config.disable_electrum_rpc,
             server_banner: config.server_banner,
             signet_magic: magic,
+            sp_begin_height: config.sp_begin_height,
+            sp_min_dust: config.sp_min_dust,
             args: args.map(|a| a.into_string().unwrap()).collect(),
         };
         eprintln!(
