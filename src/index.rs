@@ -236,8 +236,10 @@ impl Index {
                     self.store.flush(); // full compaction is performed on the first flush call
                     self.flush_needed = false;
                 }
+                if !self.is_ready {
+                    info!("Finished Looking for sp tweaks");
+                }
                 self.is_ready = true;
-                info!("Finished Looking for sp tweaks");
                 return Ok(true); // no more blocks to index (done for now)
             }
         }
