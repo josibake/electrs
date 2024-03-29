@@ -219,12 +219,7 @@ impl Index {
         } else {
             start = initial_height;
         }
-        let end = if start + 199 < self.chain.height() {
-            start + 199
-        } else {
-            self.chain.height()
-        };
-        for block_height in start..end + 1 {
+        for block_height in start..start + 1 {
             match self.chain.get_block_header(block_height) {
                 Some(new_header) => {
                     new_headers.push(NewHeader::from((*new_header, block_height)));
@@ -233,14 +228,8 @@ impl Index {
             };
         }
         match (new_headers.first(), new_headers.last()) {
-            (Some(first), Some(last)) => {
-                let count = new_headers.len();
-                info!(
-                    "Looking for sp tweaks in {} blocks: [{}..{}]",
-                    count,
-                    first.height(),
-                    last.height()
-                );
+            (Some(first), Some(_)) => {
+                info!("Looking for sp tweaks in block: {}", first.height());
             }
             _ => {
                 if self.flush_needed {
@@ -248,6 +237,7 @@ impl Index {
                     self.flush_needed = false;
                 }
                 self.is_ready = true;
+                info!("Finished Looking for sp tweaks");
                 return Ok(true); // no more blocks to index (done for now)
             }
         }
@@ -449,18 +439,17 @@ impl Index {
                         );
                     });
                     self.stats.height.set("sp", height as f64);
+                    batch.sort();
+                    self.stats.observe_batch(&batch);
+                    self.stats
+                        .observe_duration("write", || self.store.write(&batch));
+                    self.stats.observe_db(&self.store);
                 };
             };
 
             daemon.for_blocks(blockhashes, scan_block_for_sp)?;
         }
 
-        let heights: Vec<_> = heights.collect();
-        assert!(
-            heights.is_empty(),
-            "some blocks were not indexed: {:?}",
-            heights
-        );
         batch.sort();
         self.stats.observe_batch(&batch);
         self.stats
