@@ -588,11 +588,13 @@ fn scan_single_block_for_silent_payments(
                     let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
                     let mut outpoints: Vec<(String, u32)> =
                         Vec::with_capacity(parsed_tx.input.len());
+                    println!("tx: {:?}", txid);
                     for i in parsed_tx.input.iter() {
                         // get the prevout script pubkey
                         let prev_txid = i.previous_output.txid;
                         outpoints.push((prev_txid.to_string(), i.previous_output.vout));
 
+                        println!("i: {:?}", parsed_tx.input.iter().position(|x| x == i));
                         let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
                         let prevout = prev_tx.and_then(|prev_tx| {
                             let index: Option<usize> = i.previous_output.vout.try_into().ok();
