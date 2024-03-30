@@ -219,6 +219,12 @@ impl Index {
         } else {
             start = initial_height;
         }
+        // let end = if start + 199 < self.chain.height() {
+        //     start + 199
+        // } else {
+        //     self.chain.height()
+        // };
+        // for block_height in start..end + 1 {
         for block_height in start..start + 1 {
             match self.chain.get_block_header(block_height) {
                 Some(new_header) => {
@@ -230,6 +236,14 @@ impl Index {
         match (new_headers.first(), new_headers.last()) {
             (Some(first), Some(_)) => {
                 info!("Looking for sp tweaks in block: {}", first.height());
+            // (Some(first), Some(last)) => {
+            //     let count = new_headers.len();
+            //     info!(
+            //         "Looking for sp tweaks in {} blocks: [{}..{}]",
+            //         count,
+            //         first.height(),
+            //         last.height()
+            //     );
             }
             _ => {
                 if self.flush_needed {
@@ -432,7 +446,6 @@ impl Index {
                     self.stats.observe_duration("block_sp", || {
                         scan_single_block_for_silent_payments(
                             self,
-                            daemon,
                             blockhash,
                             block,
                             &mut batch,
@@ -486,6 +499,28 @@ fn index_single_block(
             self.batch
                 .txid_rows
                 .push(TxidRow::row(txid, self.height).to_db_row());
+
+            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
+                Ok(parsed_tx) => parsed_tx,
+                Err(_) => return ControlFlow::Continue(()),
+            };
+
+            for (i, o) in parsed_tx.output.iter().enumerate() {
+                if !o.script_pubkey.is_provably_unspendable() {
+                    let mut value = Vec::new();
+
+                    let outpoint = OutPoint {
+                        txid,
+                        vout: i.try_into().expect("Unexpectedly high vout"),
+                    };
+                    let row = SpendingPrefixRow::row(outpoint, self.height);
+                    value.extend(row.to_db_row().to_vec());
+                    value.extend(o.script_pubkey.to_bytes());
+
+                    self.batch.outpoint_rows.push(value.into_boxed_slice());
+                }
+            }
+
             ControlFlow::Continue(())
         }
 
@@ -532,7 +567,6 @@ fn index_single_block(
 
 fn scan_single_block_for_silent_payments(
     index: &Index,
-    daemon: &Daemon,
     block_hash: BlockHash,
     block: SerBlock,
     batch: &mut WriteBatch,
@@ -540,7 +574,6 @@ fn scan_single_block_for_silent_payments(
     initial_sync_done: bool,
 ) {
     struct IndexBlockVisitor<'a> {
-        daemon: &'a Daemon,
         index: &'a Index,
         map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
         batch: &'a mut WriteBatch,
@@ -550,303 +583,282 @@ fn scan_single_block_for_silent_payments(
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
         fn visit_transaction(&mut self, tx: &bsl::Transaction) -> core::ops::ControlFlow<()> {
-            match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
-                Ok(parsed_tx) => {
-                    if parsed_tx.is_coinbase() {
-                        return ControlFlow::Continue(());
+            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
+                Ok(parsed_tx) => parsed_tx,
+                Err(_) => return ControlFlow::Continue(()),
+            };
+
+            if parsed_tx.is_coinbase() {
+                return ControlFlow::Continue(());
+            };
+
+            let txid = bsl_txid(tx);
+
+            let mut output_pubkeys: Vec<u8> = Vec::with_capacity(parsed_tx.output.len());
+
+            for (i, o) in parsed_tx.output.iter().enumerate() {
+                if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
+                    let outpoint = OutPoint {
+                        txid,
+                        vout: i.try_into().expect("Unexpectedly high vout"),
                     };
-
-                    let txid = bsl_txid(tx);
-
-                    let mut output_pubkeys: Vec<u8> = Vec::with_capacity(parsed_tx.output.len());
-
-                    for (i, o) in parsed_tx.output.iter().enumerate() {
-                        if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
-                            let outpoint = OutPoint {
-                                txid,
-                                vout: i.try_into().expect("Unexpectedly high vout"),
-                            };
-                            if self
-                                .index
-                                .store
-                                .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
-                                .next()
-                                .is_none()
-                            {
-                                output_pubkeys.extend(outpoint.vout.to_be_bytes());
-                                output_pubkeys.extend(o.value.to_sat().to_be_bytes());
-                                output_pubkeys.extend(o.script_pubkey.to_bytes());
-                            }
-                        }
+                    if self
+                        .index
+                        .store
+                        .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
+                        .next()
+                        .is_none()
+                    {
+                        output_pubkeys.extend(outpoint.vout.to_be_bytes());
+                        output_pubkeys.extend(o.value.to_sat().to_be_bytes());
+                        output_pubkeys.extend(o.script_pubkey.to_bytes());
                     }
+                }
+            }
 
-                    if output_pubkeys.is_empty() && !self.initial_sync_done {
-                        return ControlFlow::Continue(());
-                    }
+            if output_pubkeys.is_empty() && !self.initial_sync_done {
+                return ControlFlow::Continue(());
+            }
 
-                    // Iterate over inputs
-                    let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
-                    let mut outpoints: Vec<(String, u32)> =
-                        Vec::with_capacity(parsed_tx.input.len());
-                    println!("tx: {:?}", txid);
-                    for i in parsed_tx.input.iter() {
-                        // get the prevout script pubkey
-                        let prev_txid = i.previous_output.txid;
-                        outpoints.push((prev_txid.to_string(), i.previous_output.vout));
+            let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
+            let mut outpoints: Vec<(String, u32)> = Vec::with_capacity(parsed_tx.input.len());
 
-                        println!("i: {:?}", parsed_tx.input.iter().position(|x| x == i));
-                        let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
-                        let prevout = prev_tx.and_then(|prev_tx| {
-                            let index: Option<usize> = i.previous_output.vout.try_into().ok();
+            for i in parsed_tx.input.iter() {
+                let prev_txid = i.previous_output.txid;
+                outpoints.push((prev_txid.to_string(), i.previous_output.vout));
 
-                            index.and_then(|index| {
-                                prev_tx
-                                    .output
-                                    .get(index)
-                                    .cloned()
-                                    .filter(|prevout| prevout.script_pubkey.is_p2tr())
-                            })
+                let outpoint = OutPoint {
+                    txid: prev_txid,
+                    vout: i.previous_output.vout,
+                };
+                let prev_tx = self
+                    .index
+                    .store
+                    .iter_outpoint(SpendingPrefixRow::scan_prefix(outpoint))
+                    .next();
+                let prevout_script_pubkey = prev_tx.and_then(|prev_tx| {
+                    let mut script_bytes = [0u8; 12];
+                    script_bytes.copy_from_slice(&prev_tx);
+                    let prevout_script_pubkey = bitcoin::Script::from_bytes(&script_bytes);
+                    Some(prevout_script_pubkey.to_owned())
+                });
+
+                if let Some(prevout_script_pubkey) = prevout_script_pubkey {
+                    // Make sure to only check inputs for new spends after the initial sync
+                    if self.initial_sync_done {
+                        let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
+                        let prev_block_height = prev_block_hash.and_then(|block_hash| {
+                            self.index
+                                .chain
+                                .get_block_height(&block_hash)
+                                .and_then(|height| {
+                                    u64::try_from(height).ok().and_then(|height| Some(height))
+                                })
+                        });
+                        let prev_get_tweaks = prev_block_height.and_then(|height| {
+                            Some(self.index.store.read_tweaks(height, 1).into_iter())
                         });
 
-                        if let Some(prevout) = prevout {
-                            let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-                            let prev_block_height = prev_block_hash.and_then(|block_hash| {
-                                self.index
-                                    .chain
-                                    .get_block_height(&block_hash)
-                                    .and_then(|height| {
-                                        u64::try_from(height).ok().and_then(|height| Some(height))
-                                    })
-                            });
-                            let prev_get_tweaks = prev_block_height.and_then(|height| {
-                                // Make sure to only check inputs for new spends after the initial sync
-                                if self.initial_sync_done {
-                                    Some(self.index.store.read_tweaks(height, 1).into_iter())
-                                } else {
-                                    None
-                                }
-                            });
+                        let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
+                            HashMap::new();
 
-                            let mut map: HashMap<
-                                BlockHash,
-                                HashMap<Txid, HashMap<String, Vec<u8>>>,
-                            > = HashMap::new();
+                        let mut should_update_entry = false;
 
-                            let mut should_update_entry = false;
+                        if let Some(prev_get_tweaks) = prev_get_tweaks {
+                            let _: Vec<_> = prev_get_tweaks
+                                .filter_map(|(_block_height_vec, data)| {
+                                    if !data.is_empty() {
+                                        let mut chunk = 0;
 
-                            if let Some(prev_get_tweaks) = prev_get_tweaks {
-                                let _: Vec<_> = prev_get_tweaks
-                                    .filter_map(|(_block_height_vec, data)| {
-                                        if !data.is_empty() {
-                                            let mut chunk = 0;
+                                        while data.len() > chunk {
+                                            let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
 
-                                            while data.len() > chunk {
-                                                let mut obj: HashMap<String, Vec<u8>> =
-                                                    HashMap::new();
+                                            let mut txid = [0u8; 32];
+                                            if data.len() < chunk + 32 {
+                                                return None;
+                                            }
+                                            txid.copy_from_slice(&data[chunk..chunk + 32]);
+                                            chunk += 32;
+                                            txid.reverse();
 
-                                                let mut txid = [0u8; 32];
-                                                if data.len() < chunk + 32 {
-                                                    return None;
-                                                }
-                                                txid.copy_from_slice(&data[chunk..chunk + 32]);
-                                                chunk += 32;
-                                                txid.reverse();
+                                            let mut tweak = [0u8; 33];
+                                            tweak.copy_from_slice(&data[chunk..chunk + 33]);
+                                            chunk += 33;
+                                            obj.insert("tweak".to_string(), tweak.to_vec());
 
-                                                let mut tweak = [0u8; 33];
-                                                tweak.copy_from_slice(&data[chunk..chunk + 33]);
-                                                chunk += 33;
-                                                obj.insert("tweak".to_string(), tweak.to_vec());
+                                            let mut output_pubkeys_len = [0u8; 8];
+                                            output_pubkeys_len
+                                                .copy_from_slice(&data[chunk..chunk + 8]);
+                                            chunk += 8;
 
-                                                let mut output_pubkeys_len = [0u8; 8];
-                                                output_pubkeys_len
-                                                    .copy_from_slice(&data[chunk..chunk + 8]);
-                                                chunk += 8;
+                                            let chunk_size = 46;
 
-                                                let chunk_size = 46;
+                                            data[chunk..]
+                                                .chunks(
+                                                    u64::from_be_bytes(output_pubkeys_len) as usize
+                                                )
+                                                .next()?
+                                                .chunks(chunk_size)
+                                                .for_each(|pubkey| {
+                                                    let mut pubkey_chunk = 0;
 
-                                                data[chunk..]
-                                                    .chunks(u64::from_be_bytes(output_pubkeys_len)
-                                                        as usize)
-                                                    .next()?
-                                                    .chunks(chunk_size)
-                                                    .for_each(|pubkey| {
-                                                        let mut pubkey_chunk = 0;
-
-                                                        let mut vout = [0u8; 4];
-                                                        if pubkey.len() < 4 {
-                                                            return;
-                                                        }
-                                                        vout.copy_from_slice(&pubkey[..4]);
-                                                        pubkey_chunk += 4;
-
-                                                        let mut amount = [0u8; 8];
-                                                        amount.copy_from_slice(
-                                                            &pubkey[pubkey_chunk..pubkey_chunk + 8],
-                                                        );
-                                                        pubkey_chunk += 8;
-
-                                                        let pubkey_hex =
-                                                            &pubkey[pubkey_chunk + 2..];
-                                                        pubkey_chunk += 34;
-                                                        chunk += pubkey_chunk;
-
-                                                        let output_pubkeys = {
-                                                            if u32::from_be_bytes(vout).to_string()
-                                                                == i.previous_output
-                                                                    .vout
-                                                                    .to_string()
-                                                                && prevout
-                                                                    .script_pubkey
-                                                                    .to_hex_string()
-                                                                    .rfind(
-                                                                        pubkey_hex
-                                                                            .as_hex()
-                                                                            .to_string()
-                                                                            .as_str(),
-                                                                    )
-                                                                    == Some(4)
-                                                            {
-                                                                should_update_entry = true;
-                                                                None
-                                                            } else {
-                                                                Some(pubkey.to_vec())
-                                                            }
-                                                        };
-
-                                                        if let Some(output_pubkeys) = output_pubkeys
-                                                        {
-                                                            if let Some(value) =
-                                                                obj.get_mut("output_pubkeys")
-                                                            {
-                                                                value.extend(output_pubkeys)
-                                                            } else {
-                                                                obj.insert(
-                                                                    "output_pubkeys".to_string(),
-                                                                    output_pubkeys,
-                                                                );
-                                                            }
-                                                        }
-                                                    });
-
-                                                let should_skip = {
-                                                    if should_update_entry {
-                                                        if let Some(value) =
-                                                            obj.get("output_pubkeys")
-                                                        {
-                                                            value.is_empty()
-                                                        } else {
-                                                            true
-                                                        }
-                                                    } else {
-                                                        false
+                                                    let mut vout = [0u8; 4];
+                                                    if pubkey.len() < 4 {
+                                                        return;
                                                     }
-                                                };
+                                                    vout.copy_from_slice(&pubkey[..4]);
+                                                    pubkey_chunk += 4;
 
-                                                if !should_skip {
-                                                    if let Some(value) =
-                                                        map.get_mut(&prev_block_hash.unwrap())
-                                                    {
-                                                        value.insert(
+                                                    let mut amount = [0u8; 8];
+                                                    amount.copy_from_slice(
+                                                        &pubkey[pubkey_chunk..pubkey_chunk + 8],
+                                                    );
+                                                    pubkey_chunk += 8;
+
+                                                    let pubkey_hex = &pubkey[pubkey_chunk + 2..];
+                                                    pubkey_chunk += 34;
+                                                    chunk += pubkey_chunk;
+
+                                                    let output_pubkeys = {
+                                                        if u32::from_be_bytes(vout).to_string()
+                                                            == i.previous_output.vout.to_string()
+                                                            && prevout_script_pubkey
+                                                                .to_hex_string()
+                                                                .rfind(
+                                                                    pubkey_hex
+                                                                        .as_hex()
+                                                                        .to_string()
+                                                                        .as_str(),
+                                                                )
+                                                                == Some(4)
+                                                        {
+                                                            should_update_entry = true;
+                                                            None
+                                                        } else {
+                                                            Some(pubkey.to_vec())
+                                                        }
+                                                    };
+
+                                                    if let Some(output_pubkeys) = output_pubkeys {
+                                                        if let Some(value) =
+                                                            obj.get_mut("output_pubkeys")
+                                                        {
+                                                            value.extend(output_pubkeys)
+                                                        } else {
+                                                            obj.insert(
+                                                                "output_pubkeys".to_string(),
+                                                                output_pubkeys,
+                                                            );
+                                                        }
+                                                    }
+                                                });
+
+                                            let should_skip = {
+                                                if should_update_entry {
+                                                    if let Some(value) = obj.get("output_pubkeys") {
+                                                        value.is_empty()
+                                                    } else {
+                                                        true
+                                                    }
+                                                } else {
+                                                    false
+                                                }
+                                            };
+
+                                            if !should_skip {
+                                                if let Some(value) =
+                                                    map.get_mut(&prev_block_hash.unwrap())
+                                                {
+                                                    value.insert(Txid::from_byte_array(txid), obj);
+                                                } else {
+                                                    map.insert(
+                                                        prev_block_hash.unwrap(),
+                                                        HashMap::from_iter([(
                                                             Txid::from_byte_array(txid),
                                                             obj,
-                                                        );
-                                                    } else {
-                                                        map.insert(
-                                                            prev_block_hash.unwrap(),
-                                                            HashMap::from_iter([(
-                                                                Txid::from_byte_array(txid),
-                                                                obj,
-                                                            )]),
-                                                        );
-                                                    }
+                                                        )]),
+                                                    );
                                                 }
                                             }
-
-                                            Some(())
-                                        } else {
-                                            None
                                         }
-                                    })
-                                    .collect();
-                            }
 
-                            if should_update_entry == true {
-                                for (_hash, tweaks_by_txid) in map {
-                                    let mut value =
-                                        prev_block_height.unwrap().to_be_bytes().to_vec();
-
-                                    for (txid, tweak_pubkey_obj) in tweaks_by_txid {
-                                        let mut txid_value = [0u8; 32];
-                                        txid_value.copy_from_slice(&txid[..]);
-                                        txid_value.reverse();
-
-                                        value.extend(txid_value);
-                                        if let Some(output_pubkeys) =
-                                            tweak_pubkey_obj.get("output_pubkeys")
-                                        {
-                                            value.extend(&tweak_pubkey_obj["tweak"]);
-                                            value.extend(output_pubkeys.len().to_be_bytes());
-                                            value.extend(output_pubkeys);
-                                        }
-                                    }
-
-                                    self.batch.tweak_rows.push(value.into_boxed_slice());
-                                }
-                            };
-
-                            match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
-                                script_sig: i.script_sig.to_bytes(),
-                                txinwitness: i.witness.to_vec(),
-                                script_pub_key: prevout.script_pubkey.to_bytes(),
-                            }) {
-                                Ok(Some(pubkey)) => pubkeys.push(pubkey),
-                                Ok(None) => (),
-                                Err(_) => (),
-                            };
-                        }
-                    }
-
-                    let pubkeys_ref: Vec<&PublicKey> = pubkeys.iter().collect();
-
-                    if !pubkeys_ref.is_empty() && !output_pubkeys.is_empty() {
-                        match recipient_calculate_tweak_data(&pubkeys_ref, &outpoints) {
-                            Ok(tweak) => {
-                                // check in which block is this transaction
-                                if let Some(block_hash) = self.index.filter_by_txid(txid).next() {
-                                    let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
-                                    obj.insert(
-                                        "tweak".to_string(),
-                                        Vec::from_iter(tweak.serialize()),
-                                    );
-                                    obj.insert(
-                                        "output_pubkeys".to_string(),
-                                        output_pubkeys.into_iter().collect(),
-                                    );
-
-                                    if let Some(value) = self.map.get_mut(&block_hash) {
-                                        value.insert(txid, obj);
+                                        Some(())
                                     } else {
-                                        self.map
-                                            .insert(block_hash, HashMap::from_iter([(txid, obj)]));
+                                        None
+                                    }
+                                })
+                                .collect();
+                        }
+
+                        if should_update_entry == true {
+                            for (_hash, tweaks_by_txid) in map {
+                                let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
+
+                                for (txid, tweak_pubkey_obj) in tweaks_by_txid {
+                                    let mut txid_value = [0u8; 32];
+                                    txid_value.copy_from_slice(&txid[..]);
+                                    txid_value.reverse();
+
+                                    value.extend(txid_value);
+                                    if let Some(output_pubkeys) =
+                                        tweak_pubkey_obj.get("output_pubkeys")
+                                    {
+                                        value.extend(&tweak_pubkey_obj["tweak"]);
+                                        value.extend(output_pubkeys.len().to_be_bytes());
+                                        value.extend(output_pubkeys);
                                     }
                                 }
+
+                                self.batch.tweak_rows.push(value.into_boxed_slice());
                             }
-                            Err(_) => {}
                         };
                     }
 
-                    ControlFlow::Continue(())
+                    match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
+                        script_sig: i.script_sig.to_bytes(),
+                        txinwitness: i.witness.to_vec(),
+                        script_pub_key: prevout_script_pubkey.to_bytes(),
+                    }) {
+                        Ok(Some(pubkey)) => pubkeys.push(pubkey),
+                        Ok(None) => (),
+                        Err(_) => (),
+                    };
                 }
-                // TODO: not scanned and skipped?
-                Err(_) => ControlFlow::Continue(()),
             }
+
+            let pubkeys_ref: Vec<&PublicKey> = pubkeys.iter().collect();
+
+            if !pubkeys_ref.is_empty() && !output_pubkeys.is_empty() {
+                match recipient_calculate_tweak_data(&pubkeys_ref, &outpoints) {
+                    Ok(tweak) => {
+                        // check in which block is this transaction
+                        if let Some(block_hash) = self.index.filter_by_txid(txid).next() {
+                            let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
+                            obj.insert("tweak".to_string(), Vec::from_iter(tweak.serialize()));
+                            obj.insert(
+                                "output_pubkeys".to_string(),
+                                output_pubkeys.into_iter().collect(),
+                            );
+
+                            if let Some(value) = self.map.get_mut(&block_hash) {
+                                value.insert(txid, obj);
+                            } else {
+                                self.map
+                                    .insert(block_hash, HashMap::from_iter([(txid, obj)]));
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                };
+            }
+
+            ControlFlow::Continue(())
         }
     }
 
     let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
         HashMap::with_capacity(index.batch_size);
     let mut index_block = IndexBlockVisitor {
-        daemon,
         index,
         map: &mut map,
         batch,
