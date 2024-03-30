@@ -188,6 +188,8 @@ impl Index {
             .and_then(|dust| u64::try_from(dust).ok())
             .unwrap_or(0);
 
+        self.flush_needed = true;
+
         if let Some(row) = self.store.last_sp() {
             match deserialize::<BlockHash>(&row) {
                 Ok(blockhash) => {
@@ -236,14 +238,14 @@ impl Index {
         match (new_headers.first(), new_headers.last()) {
             (Some(first), Some(_)) => {
                 info!("Looking for sp tweaks in block: {}", first.height());
-            // (Some(first), Some(last)) => {
-            //     let count = new_headers.len();
-            //     info!(
-            //         "Looking for sp tweaks in {} blocks: [{}..{}]",
-            //         count,
-            //         first.height(),
-            //         last.height()
-            //     );
+                // (Some(first), Some(last)) => {
+                //     let count = new_headers.len();
+                //     info!(
+                //         "Looking for sp tweaks in {} blocks: [{}..{}]",
+                //         count,
+                //         first.height(),
+                //         last.height()
+                //     );
             }
             _ => {
                 if self.flush_needed {
@@ -264,7 +266,9 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, true, min_dust, !self.flush_needed)?;
+            // println!("flush_needed: {}", self.flush_needed);
+            // println!("is_ready: {}", self.is_ready);
+            self.sync_blocks(daemon, chunk, true, min_dust)?;
         }
         self.flush_needed = true;
         Ok(false) // sync is not done
@@ -408,7 +412,7 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, false, 0, !self.flush_needed)?;
+            self.sync_blocks(daemon, chunk, false, 0)?;
         }
         self.chain.update(new_headers);
         self.stats.observe_chain(&self.chain);
@@ -422,7 +426,6 @@ impl Index {
         chunk: &[NewHeader],
         sp: bool,
         min_dust: u64,
-        initial_sync_done: bool,
     ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
@@ -445,12 +448,7 @@ impl Index {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block_sp", || {
                         scan_single_block_for_silent_payments(
-                            self,
-                            blockhash,
-                            block,
-                            &mut batch,
-                            min_dust,
-                            initial_sync_done,
+                            self, blockhash, block, &mut batch, min_dust,
                         );
                     });
                     self.stats.height.set("sp", height as f64);
@@ -571,14 +569,11 @@ fn scan_single_block_for_silent_payments(
     block: SerBlock,
     batch: &mut WriteBatch,
     min_dust: u64,
-    initial_sync_done: bool,
 ) {
     struct IndexBlockVisitor<'a> {
         index: &'a Index,
         map: &'a mut HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>>,
-        batch: &'a mut WriteBatch,
         min_dust: u64,
-        initial_sync_done: bool,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -595,9 +590,11 @@ fn scan_single_block_for_silent_payments(
             let txid = bsl_txid(tx);
 
             let mut output_pubkeys: Vec<u8> = Vec::with_capacity(parsed_tx.output.len());
+            // println!("txid: {}", txid.to_string());
 
             for (i, o) in parsed_tx.output.iter().enumerate() {
-                if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
+                if o.script_pubkey.is_p2tr() && o.value.to_sat() > self.min_dust {
+                    // println!("sat: {}", o.value.to_sat());
                     let outpoint = OutPoint {
                         txid,
                         vout: i.try_into().expect("Unexpectedly high vout"),
@@ -616,18 +613,17 @@ fn scan_single_block_for_silent_payments(
                 }
             }
 
-            if output_pubkeys.is_empty() && !self.initial_sync_done {
+            if output_pubkeys.is_empty() {
                 return ControlFlow::Continue(());
             }
+            // println!("output_pubkeys.is_empty(): {}", output_pubkeys.is_empty());
+            // println!("initial_sync_done: {}", self.initial_sync_done);
 
             let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
             let mut outpoints: Vec<(String, u32)> = Vec::with_capacity(parsed_tx.input.len());
 
             println!("txid: {}", txid.to_string());
-            let mut index = 0;
             for i in parsed_tx.input.iter() {
-                println!("index: {}", index);
-                index += 1;
                 let prev_txid = i.previous_output.txid;
                 outpoints.push((prev_txid.to_string(), i.previous_output.vout));
 
@@ -649,174 +645,172 @@ fn scan_single_block_for_silent_payments(
 
                 if let Some(prevout_script_pubkey) = prevout_script_pubkey {
                     // Make sure to only check inputs for new spends after the initial sync
-                    if self.initial_sync_done {
-                        let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-                        let prev_block_height = prev_block_hash.and_then(|block_hash| {
-                            self.index
-                                .chain
-                                .get_block_height(&block_hash)
-                                .and_then(|height| {
-                                    u64::try_from(height).ok().and_then(|height| Some(height))
-                                })
-                        });
-                        let prev_get_tweaks = prev_block_height.and_then(|height| {
-                            Some(self.index.store.read_tweaks(height, 1).into_iter())
-                        });
+                    // let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
+                    // let prev_block_height = prev_block_hash.and_then(|block_hash| {
+                    //     self.index
+                    //         .chain
+                    //         .get_block_height(&block_hash)
+                    //         .and_then(|height| {
+                    //             u64::try_from(height).ok().and_then(|height| Some(height))
+                    //         })
+                    // });
+                    // let prev_get_tweaks = prev_block_height.and_then(|height| {
+                    //     Some(self.index.store.read_tweaks(height, 1).into_iter())
+                    // });
 
-                        let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
-                            HashMap::new();
+                    // let mut map: HashMap<BlockHash, HashMap<Txid, HashMap<String, Vec<u8>>>> =
+                    //     HashMap::new();
 
-                        let mut should_update_entry = false;
+                    // let mut should_update_entry = false;
 
-                        if let Some(prev_get_tweaks) = prev_get_tweaks {
-                            let _: Vec<_> = prev_get_tweaks
-                                .filter_map(|(_block_height_vec, data)| {
-                                    if !data.is_empty() {
-                                        let mut chunk = 0;
+                    // if let Some(prev_get_tweaks) = prev_get_tweaks {
+                    //     let _: Vec<_> = prev_get_tweaks
+                    //         .filter_map(|(_block_height_vec, data)| {
+                    //             if !data.is_empty() {
+                    //                 let mut chunk = 0;
 
-                                        while data.len() > chunk {
-                                            let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
+                    //                 while data.len() > chunk {
+                    //                     let mut obj: HashMap<String, Vec<u8>> = HashMap::new();
 
-                                            let mut txid = [0u8; 32];
-                                            if data.len() < chunk + 32 {
-                                                return None;
-                                            }
-                                            txid.copy_from_slice(&data[chunk..chunk + 32]);
-                                            chunk += 32;
-                                            txid.reverse();
+                    //                     let mut txid = [0u8; 32];
+                    //                     if data.len() < chunk + 32 {
+                    //                         return None;
+                    //                     }
+                    //                     txid.copy_from_slice(&data[chunk..chunk + 32]);
+                    //                     chunk += 32;
+                    //                     txid.reverse();
 
-                                            let mut tweak = [0u8; 33];
-                                            tweak.copy_from_slice(&data[chunk..chunk + 33]);
-                                            chunk += 33;
-                                            obj.insert("tweak".to_string(), tweak.to_vec());
+                    //                     let mut tweak = [0u8; 33];
+                    //                     tweak.copy_from_slice(&data[chunk..chunk + 33]);
+                    //                     chunk += 33;
+                    //                     obj.insert("tweak".to_string(), tweak.to_vec());
 
-                                            let mut output_pubkeys_len = [0u8; 8];
-                                            output_pubkeys_len
-                                                .copy_from_slice(&data[chunk..chunk + 8]);
-                                            chunk += 8;
+                    //                     let mut output_pubkeys_len = [0u8; 8];
+                    //                     output_pubkeys_len
+                    //                         .copy_from_slice(&data[chunk..chunk + 8]);
+                    //                     chunk += 8;
 
-                                            let chunk_size = 46;
+                    //                     let chunk_size = 46;
 
-                                            data[chunk..]
-                                                .chunks(
-                                                    u64::from_be_bytes(output_pubkeys_len) as usize
-                                                )
-                                                .next()?
-                                                .chunks(chunk_size)
-                                                .for_each(|pubkey| {
-                                                    let mut pubkey_chunk = 0;
+                    //                     data[chunk..]
+                    //                         .chunks(
+                    //                             u64::from_be_bytes(output_pubkeys_len) as usize
+                    //                         )
+                    //                         .next()?
+                    //                         .chunks(chunk_size)
+                    //                         .for_each(|pubkey| {
+                    //                             let mut pubkey_chunk = 0;
 
-                                                    let mut vout = [0u8; 4];
-                                                    if pubkey.len() < 4 {
-                                                        return;
-                                                    }
-                                                    vout.copy_from_slice(&pubkey[..4]);
-                                                    pubkey_chunk += 4;
+                    //                             let mut vout = [0u8; 4];
+                    //                             if pubkey.len() < 4 {
+                    //                                 return;
+                    //                             }
+                    //                             vout.copy_from_slice(&pubkey[..4]);
+                    //                             pubkey_chunk += 4;
 
-                                                    let mut amount = [0u8; 8];
-                                                    amount.copy_from_slice(
-                                                        &pubkey[pubkey_chunk..pubkey_chunk + 8],
-                                                    );
-                                                    pubkey_chunk += 8;
+                    //                             let mut amount = [0u8; 8];
+                    //                             amount.copy_from_slice(
+                    //                                 &pubkey[pubkey_chunk..pubkey_chunk + 8],
+                    //                             );
+                    //                             pubkey_chunk += 8;
 
-                                                    let pubkey_hex = &pubkey[pubkey_chunk + 2..];
-                                                    pubkey_chunk += 34;
-                                                    chunk += pubkey_chunk;
+                    //                             let pubkey_hex = &pubkey[pubkey_chunk + 2..];
+                    //                             pubkey_chunk += 34;
+                    //                             chunk += pubkey_chunk;
 
-                                                    let output_pubkeys = {
-                                                        if u32::from_be_bytes(vout).to_string()
-                                                            == i.previous_output.vout.to_string()
-                                                            && prevout_script_pubkey
-                                                                .to_hex_string()
-                                                                .rfind(
-                                                                    pubkey_hex
-                                                                        .as_hex()
-                                                                        .to_string()
-                                                                        .as_str(),
-                                                                )
-                                                                == Some(4)
-                                                        {
-                                                            should_update_entry = true;
-                                                            None
-                                                        } else {
-                                                            Some(pubkey.to_vec())
-                                                        }
-                                                    };
+                    //                             let output_pubkeys = {
+                    //                                 if u32::from_be_bytes(vout).to_string()
+                    //                                     == i.previous_output.vout.to_string()
+                    //                                     && prevout_script_pubkey
+                    //                                         .to_hex_string()
+                    //                                         .rfind(
+                    //                                             pubkey_hex
+                    //                                                 .as_hex()
+                    //                                                 .to_string()
+                    //                                                 .as_str(),
+                    //                                         )
+                    //                                         == Some(4)
+                    //                                 {
+                    //                                     should_update_entry = true;
+                    //                                     None
+                    //                                 } else {
+                    //                                     Some(pubkey.to_vec())
+                    //                                 }
+                    //                             };
 
-                                                    if let Some(output_pubkeys) = output_pubkeys {
-                                                        if let Some(value) =
-                                                            obj.get_mut("output_pubkeys")
-                                                        {
-                                                            value.extend(output_pubkeys)
-                                                        } else {
-                                                            obj.insert(
-                                                                "output_pubkeys".to_string(),
-                                                                output_pubkeys,
-                                                            );
-                                                        }
-                                                    }
-                                                });
+                    //                             if let Some(output_pubkeys) = output_pubkeys {
+                    //                                 if let Some(value) =
+                    //                                     obj.get_mut("output_pubkeys")
+                    //                                 {
+                    //                                     value.extend(output_pubkeys)
+                    //                                 } else {
+                    //                                     obj.insert(
+                    //                                         "output_pubkeys".to_string(),
+                    //                                         output_pubkeys,
+                    //                                     );
+                    //                                 }
+                    //                             }
+                    //                         });
 
-                                            let should_skip = {
-                                                if should_update_entry {
-                                                    if let Some(value) = obj.get("output_pubkeys") {
-                                                        value.is_empty()
-                                                    } else {
-                                                        true
-                                                    }
-                                                } else {
-                                                    false
-                                                }
-                                            };
+                    //                     let should_skip = {
+                    //                         if should_update_entry {
+                    //                             if let Some(value) = obj.get("output_pubkeys") {
+                    //                                 value.is_empty()
+                    //                             } else {
+                    //                                 true
+                    //                             }
+                    //                         } else {
+                    //                             false
+                    //                         }
+                    //                     };
 
-                                            if !should_skip {
-                                                if let Some(value) =
-                                                    map.get_mut(&prev_block_hash.unwrap())
-                                                {
-                                                    value.insert(Txid::from_byte_array(txid), obj);
-                                                } else {
-                                                    map.insert(
-                                                        prev_block_hash.unwrap(),
-                                                        HashMap::from_iter([(
-                                                            Txid::from_byte_array(txid),
-                                                            obj,
-                                                        )]),
-                                                    );
-                                                }
-                                            }
-                                        }
+                    //                     if !should_skip {
+                    //                         if let Some(value) =
+                    //                             map.get_mut(&prev_block_hash.unwrap())
+                    //                         {
+                    //                             value.insert(Txid::from_byte_array(txid), obj);
+                    //                         } else {
+                    //                             map.insert(
+                    //                                 prev_block_hash.unwrap(),
+                    //                                 HashMap::from_iter([(
+                    //                                     Txid::from_byte_array(txid),
+                    //                                     obj,
+                    //                                 )]),
+                    //                             );
+                    //                         }
+                    //                     }
+                    //                 }
 
-                                        Some(())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                        }
+                    //                 Some(())
+                    //             } else {
+                    //                 None
+                    //             }
+                    //         })
+                    //         .collect();
+                    // }
 
-                        if should_update_entry == true {
-                            for (_hash, tweaks_by_txid) in map {
-                                let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
+                    // if should_update_entry == true {
+                    //     for (_hash, tweaks_by_txid) in map {
+                    //         let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
 
-                                for (txid, tweak_pubkey_obj) in tweaks_by_txid {
-                                    let mut txid_value = [0u8; 32];
-                                    txid_value.copy_from_slice(&txid[..]);
-                                    txid_value.reverse();
+                    //         for (txid, tweak_pubkey_obj) in tweaks_by_txid {
+                    //             let mut txid_value = [0u8; 32];
+                    //             txid_value.copy_from_slice(&txid[..]);
+                    //             txid_value.reverse();
 
-                                    value.extend(txid_value);
-                                    if let Some(output_pubkeys) =
-                                        tweak_pubkey_obj.get("output_pubkeys")
-                                    {
-                                        value.extend(&tweak_pubkey_obj["tweak"]);
-                                        value.extend(output_pubkeys.len().to_be_bytes());
-                                        value.extend(output_pubkeys);
-                                    }
-                                }
+                    //             value.extend(txid_value);
+                    //             if let Some(output_pubkeys) =
+                    //                 tweak_pubkey_obj.get("output_pubkeys")
+                    //             {
+                    //                 value.extend(&tweak_pubkey_obj["tweak"]);
+                    //                 value.extend(output_pubkeys.len().to_be_bytes());
+                    //                 value.extend(output_pubkeys);
+                    //             }
+                    //         }
 
-                                self.batch.tweak_rows.push(value.into_boxed_slice());
-                            }
-                        };
-                    }
+                    //         self.batch.tweak_rows.push(value.into_boxed_slice());
+                    //     }
+                    // };
 
                     match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
                         script_sig: i.script_sig.to_bytes(),
@@ -865,9 +859,7 @@ fn scan_single_block_for_silent_payments(
     let mut index_block = IndexBlockVisitor {
         index,
         map: &mut map,
-        batch,
         min_dust,
-        initial_sync_done,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}
