@@ -623,7 +623,11 @@ fn scan_single_block_for_silent_payments(
             let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
             let mut outpoints: Vec<(String, u32)> = Vec::with_capacity(parsed_tx.input.len());
 
+            println!("txid: {}", txid.to_string());
+            let mut index = 0;
             for i in parsed_tx.input.iter() {
+                println!("index: {}", index);
+                index += 1;
                 let prev_txid = i.previous_output.txid;
                 outpoints.push((prev_txid.to_string(), i.previous_output.vout));
 
