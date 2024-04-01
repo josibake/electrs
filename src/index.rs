@@ -520,137 +520,137 @@ fn index_single_block(
             let row = SpendingPrefixRow::row(prevout, self.height);
             self.batch.spending_rows.push(row.to_db_row());
 
-            let prev_tx_script_pubkey = &self
-                .index
-                .store
-                .read_outpoint_script(SpendingPrefixRow::scan_prefix(prevout));
+            // let prev_tx_script_pubkey = &self
+            //     .index
+            //     .store
+            //     .read_outpoint_script(SpendingPrefixRow::scan_prefix(prevout));
 
-            if prev_tx_script_pubkey.is_empty() {
-                return ControlFlow::Continue(());
-            }
+            // if prev_tx_script_pubkey.is_empty() {
+            //     return ControlFlow::Continue(());
+            // }
 
-            let prev_tx_script_pubkey = &prev_tx_script_pubkey[0];
+            // let prev_tx_script_pubkey = &prev_tx_script_pubkey[0];
 
-            let prevout_script_pubkey =
-                bitcoin::Script::from_bytes(&prev_tx_script_pubkey).to_owned();
+            // let prevout_script_pubkey =
+            //     bitcoin::Script::from_bytes(&prev_tx_script_pubkey).to_owned();
 
-            if prevout_script_pubkey.is_empty() || !prevout_script_pubkey.is_p2tr() {
-                return ControlFlow::Continue(());
-            }
+            // if prevout_script_pubkey.is_empty() || !prevout_script_pubkey.is_p2tr() {
+            //     return ControlFlow::Continue(());
+            // }
 
-            let prev_txid = Txid::from_slice(&prevout.txid[..]).unwrap();
-            let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-            let prev_block_height = prev_block_hash.and_then(|block_hash| {
-                self.index
-                    .chain
-                    .get_block_height(&block_hash)
-                    .and_then(|height| u64::try_from(height).ok().and_then(|height| Some(height)))
-            });
-            let prev_get_tweaks = prev_block_height
-                .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
+            // let prev_txid = Txid::from_slice(&prevout.txid[..]).unwrap();
+            // let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
+            // let prev_block_height = prev_block_hash.and_then(|block_hash| {
+            //     self.index
+            //         .chain
+            //         .get_block_height(&block_hash)
+            //         .and_then(|height| u64::try_from(height).ok().and_then(|height| Some(height)))
+            // });
+            // let prev_get_tweaks = prev_block_height
+            //     .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
 
-            if prev_get_tweaks.is_none() {
-                return ControlFlow::Continue(());
-            }
+            // if prev_get_tweaks.is_none() {
+            //     return ControlFlow::Continue(());
+            // }
 
-            let mut should_update_entry = false;
-            let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
+            // let mut should_update_entry = false;
+            // let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
 
-            let _: Vec<_> = prev_get_tweaks
-                .unwrap()
-                .filter_map(|(_block_height_vec, data)| {
-                    if !data.is_empty() {
-                        let mut chunk = 0;
+            // let _: Vec<_> = prev_get_tweaks
+            //     .unwrap()
+            //     .filter_map(|(_block_height_vec, data)| {
+            //         if !data.is_empty() {
+            //             let mut chunk = 0;
 
-                        while data.len() > chunk {
-                            let mut txid = [0u8; 32];
-                            if data.len() < chunk + 32 {
-                                return None;
-                            }
-                            txid.copy_from_slice(&data[chunk..chunk + 32]);
-                            chunk += 32;
+            //             while data.len() > chunk {
+            //                 let mut txid = [0u8; 32];
+            //                 if data.len() < chunk + 32 {
+            //                     return None;
+            //                 }
+            //                 txid.copy_from_slice(&data[chunk..chunk + 32]);
+            //                 chunk += 32;
 
-                            value.extend(txid);
+            //                 value.extend(txid);
 
-                            let mut tweak = [0u8; 33];
-                            tweak.copy_from_slice(&data[chunk..chunk + 33]);
-                            chunk += 33;
-                            value.extend(&tweak.to_vec());
+            //                 let mut tweak = [0u8; 33];
+            //                 tweak.copy_from_slice(&data[chunk..chunk + 33]);
+            //                 chunk += 33;
+            //                 value.extend(&tweak.to_vec());
 
-                            let mut output_pubkeys_len = [0u8; 8];
-                            output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
-                            chunk += 8;
+            //                 let mut output_pubkeys_len = [0u8; 8];
+            //                 output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
+            //                 chunk += 8;
 
-                            let chunk_size = 46;
+            //                 let chunk_size = 46;
 
-                            let mut output_pubkeys: Vec<u8> = Vec::new();
+            //                 let mut output_pubkeys: Vec<u8> = Vec::new();
 
-                            data[chunk..]
-                                .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
-                                .next()?
-                                .chunks(chunk_size)
-                                .for_each(|pubkey| {
-                                    let mut pubkey_chunk = 0;
+            //                 data[chunk..]
+            //                     .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
+            //                     .next()?
+            //                     .chunks(chunk_size)
+            //                     .for_each(|pubkey| {
+            //                         let mut pubkey_chunk = 0;
 
-                                    let mut vout = [0u8; 4];
-                                    if pubkey.len() < 4 {
-                                        return;
-                                    }
-                                    vout.copy_from_slice(&pubkey[..4]);
-                                    pubkey_chunk += 4;
+            //                         let mut vout = [0u8; 4];
+            //                         if pubkey.len() < 4 {
+            //                             return;
+            //                         }
+            //                         vout.copy_from_slice(&pubkey[..4]);
+            //                         pubkey_chunk += 4;
 
-                                    let mut amount = [0u8; 8];
-                                    amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
-                                    pubkey_chunk += 8;
+            //                         let mut amount = [0u8; 8];
+            //                         amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
+            //                         pubkey_chunk += 8;
 
-                                    let pubkey_hex = &pubkey[pubkey_chunk + 2..];
-                                    pubkey_chunk += 34;
-                                    chunk += pubkey_chunk;
+            //                         let pubkey_hex = &pubkey[pubkey_chunk + 2..];
+            //                         pubkey_chunk += 34;
+            //                         chunk += pubkey_chunk;
 
-                                    let output_pubkey = {
-                                        if u32::from_be_bytes(vout).to_string()
-                                            == prevout.vout.to_string()
-                                            && prevout_script_pubkey
-                                                .to_hex_string()
-                                                .rfind(pubkey_hex.as_hex().to_string().as_str())
-                                                == Some(4)
-                                        {
-                                            should_update_entry = true;
-                                            None
-                                        } else {
-                                            Some(pubkey.to_vec())
-                                        }
-                                    };
+            //                         let output_pubkey = {
+            //                             if u32::from_be_bytes(vout).to_string()
+            //                                 == prevout.vout.to_string()
+            //                                 && prevout_script_pubkey
+            //                                     .to_hex_string()
+            //                                     .rfind(pubkey_hex.as_hex().to_string().as_str())
+            //                                     == Some(4)
+            //                             {
+            //                                 should_update_entry = true;
+            //                                 None
+            //                             } else {
+            //                                 Some(pubkey.to_vec())
+            //                             }
+            //                         };
 
-                                    if let Some(output_pubkey) = output_pubkey {
-                                        output_pubkeys.extend(output_pubkey);
-                                    }
-                                });
+            //                         if let Some(output_pubkey) = output_pubkey {
+            //                             output_pubkeys.extend(output_pubkey);
+            //                         }
+            //                     });
 
-                            let should_skip = {
-                                if should_update_entry {
-                                    output_pubkeys.is_empty()
-                                } else {
-                                    false
-                                }
-                            };
+            //                 let should_skip = {
+            //                     if should_update_entry {
+            //                         output_pubkeys.is_empty()
+            //                     } else {
+            //                         false
+            //                     }
+            //                 };
 
-                            if !should_skip {
-                                value.extend(output_pubkeys.len().to_be_bytes());
-                                value.extend(output_pubkeys);
-                            }
-                        }
+            //                 if !should_skip {
+            //                     value.extend(output_pubkeys.len().to_be_bytes());
+            //                     value.extend(output_pubkeys);
+            //                 }
+            //             }
 
-                        Some(())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            //             Some(())
+            //         } else {
+            //             None
+            //         }
+            //     })
+            //     .collect();
 
-            if should_update_entry == true {
-                self.batch.tweak_rows.push(value.into_boxed_slice());
-            };
+            // if should_update_entry == true {
+            //     self.batch.tweak_rows.push(value.into_boxed_slice());
+            // };
             ControlFlow::Continue(())
         }
 
