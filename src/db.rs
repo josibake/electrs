@@ -254,10 +254,6 @@ impl DBStore {
         self.iter_prefix_cf(self.txid_cf(), prefix)
     }
 
-    pub(crate) fn iter_outpoint(&self, prefix: Row) -> impl Iterator<Item = Row> + '_ {
-        self.iter_prefix_cf(self.outpoint_cf(), prefix)
-    }
-
     fn iter_prefix_cf(
         &self,
         cf: &rocksdb::ColumnFamily,
@@ -269,6 +265,16 @@ impl DBStore {
         self.db
             .iterator_cf_opt(cf, opts, mode)
             .map(|row| row.expect("prefix iterator failed").0) // values are empty in prefix-scanned CFs
+    }
+
+    pub(crate) fn read_outpoint_script(&self, prefix: Row) -> Vec<Row> {
+        let mode = rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward);
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_prefix_same_as_start(true);
+        self.db
+            .iterator_cf_opt(self.outpoint_cf(), opts, mode)
+            .map(|row| row.expect("prefix iterator failed").1)
+            .collect()
     }
 
     pub(crate) fn read_headers(&self) -> Vec<Row> {
