@@ -206,6 +206,16 @@ impl Daemon {
             .context("failed to get transaction")
     }
 
+    pub(crate) fn get_tx_out(
+        &self,
+        txid: &Txid,
+        vout: u32,
+    ) -> Result<Option<json::GetTxOutResult>> {
+        self.rpc
+            .get_tx_out(txid, vout, None)
+            .context("failed to get txout")
+    }
+
     pub(crate) fn get_block_txids(&self, blockhash: BlockHash) -> Result<Vec<Txid>> {
         Ok(self
             .rpc

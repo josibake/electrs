@@ -435,7 +435,7 @@ impl Index {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     scan_single_block_for_silent_payments(
-                        self, daemon, height, blockhash, block, &mut batch, min_dust,
+                        daemon, height, blockhash, block, &mut batch, min_dust,
                     );
                 };
             };
@@ -481,27 +481,6 @@ fn index_single_block(
             self.batch
                 .txid_rows
                 .push(TxidRow::row(txid, self.height).to_db_row());
-
-            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
-                Ok(parsed_tx) => parsed_tx,
-                Err(_) => return ControlFlow::Continue(()),
-            };
-
-            for (i, o) in parsed_tx.output.iter().enumerate() {
-                if !o.script_pubkey.is_provably_unspendable() {
-                    let mut value = Vec::new();
-
-                    let outpoint = OutPoint {
-                        txid,
-                        vout: i.try_into().expect("Unexpectedly high vout"),
-                    };
-                    let row = SpendingPrefixRow::row(outpoint, self.height);
-                    value.extend(row.to_db_row().to_vec());
-                    value.extend(o.script_pubkey.to_bytes());
-
-                    self.batch.outpoint_rows.push(value.into_boxed_slice());
-                }
-            }
 
             ControlFlow::Continue(())
         }
@@ -693,7 +672,6 @@ fn index_single_block(
 }
 
 fn scan_single_block_for_silent_payments(
-    index: &Index,
     daemon: &Daemon,
     block_height: usize,
     block_hash: BlockHash,
@@ -702,7 +680,6 @@ fn scan_single_block_for_silent_payments(
     min_dust: u64,
 ) {
     struct IndexBlockVisitor<'a> {
-        index: &'a Index,
         daemon: &'a Daemon,
         min_dust: u64,
         value: &'a mut Vec<u8>,
@@ -729,27 +706,20 @@ fn scan_single_block_for_silent_payments(
 
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
-                info!("Output: {:?}", o.script_pubkey);
-                if o.script_pubkey.is_p2tr() && o.value.to_sat() > self.min_dust {
-                    let outpoint = OutPoint {
-                        txid,
-                        vout: *i.lock().unwrap(),
-                    };
-                    if self
-                        .index
-                        .store
-                        .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
-                        .next()
-                        .is_none()
-                    {
+                let amount = o.value.to_sat();
+                if o.script_pubkey.is_p2tr() && amount > self.min_dust {
+                    let is_unspent = self
+                        .daemon
+                        .get_tx_out(&txid, *i.lock().unwrap())
+                        .ok()
+                        .and_then(|result| result);
+
+                    if !is_unspent.is_none() {
                         output_pubkeys
                             .lock()
                             .unwrap()
-                            .extend(outpoint.vout.to_be_bytes());
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(o.value.to_sat().to_be_bytes());
+                            .extend(i.lock().unwrap().to_be_bytes());
+                        output_pubkeys.lock().unwrap().extend(amount.to_be_bytes());
                         output_pubkeys
                             .lock()
                             .unwrap()
@@ -827,7 +797,6 @@ fn scan_single_block_for_silent_payments(
     let tx_index = 0;
 
     let mut index_block = IndexBlockVisitor {
-        index,
         daemon,
         value: &mut value,
         min_dust,
