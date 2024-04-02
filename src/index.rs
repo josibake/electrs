@@ -435,7 +435,7 @@ impl Index {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     scan_single_block_for_silent_payments(
-                        self, height, blockhash, block, &mut batch, min_dust,
+                        self, daemon, height, blockhash, block, &mut batch, min_dust,
                     );
                 };
             };
@@ -694,6 +694,7 @@ fn index_single_block(
 
 fn scan_single_block_for_silent_payments(
     index: &Index,
+    daemon: &Daemon,
     block_height: usize,
     block_hash: BlockHash,
     block: SerBlock,
@@ -702,6 +703,7 @@ fn scan_single_block_for_silent_payments(
 ) {
     struct IndexBlockVisitor<'a> {
         index: &'a Index,
+        daemon: &'a Daemon,
         min_dust: u64,
         value: &'a mut Vec<u8>,
         tx_index: usize,
@@ -728,32 +730,22 @@ fn scan_single_block_for_silent_payments(
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
                 info!("Output: {:?}", o.script_pubkey);
-                if o.script_pubkey.is_p2tr() && o.value.to_sat() > self.min_dust {
-                    let outpoint = OutPoint {
-                        txid,
-                        vout: *i.lock().unwrap(),
-                    };
-                    if self
-                        .index
-                        .store
-                        .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
-                        .next()
-                        .is_none()
-                    {
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(outpoint.vout.to_be_bytes());
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(o.value.to_sat().to_be_bytes());
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(o.script_pubkey.to_bytes());
-                    }
-                }
+                let outpoint = OutPoint {
+                    txid,
+                    vout: *i.lock().unwrap(),
+                };
+                output_pubkeys
+                    .lock()
+                    .unwrap()
+                    .extend(outpoint.vout.to_be_bytes());
+                output_pubkeys
+                    .lock()
+                    .unwrap()
+                    .extend(o.value.to_sat().to_be_bytes());
+                output_pubkeys
+                    .lock()
+                    .unwrap()
+                    .extend(o.script_pubkey.to_bytes());
                 *i.lock().unwrap() += 1;
             });
 
@@ -769,25 +761,19 @@ fn scan_single_block_for_silent_payments(
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
 
-                let prev_tx_script_pubkey =
-                    &self
-                        .index
-                        .store
-                        .read_outpoint_script(SpendingPrefixRow::scan_prefix(OutPoint {
-                            txid: prev_txid,
-                            vout: prev_vout,
-                        }))[0];
-
-                if prev_tx_script_pubkey.is_empty() {
-                    return;
-                }
-
+                let prev_tx: bitcoin::Transaction = self
+                    .daemon
+                    .get_transaction(&prev_txid, None)
+                    .expect("Spending non existent UTXO");
+                let index: usize = prev_vout.try_into().expect("Unexpectedly high vout");
+                let prevout: &bitcoin::TxOut = prev_tx
+                    .output
+                    .get(index)
+                    .expect("Spending a non existent UTXO");
                 match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
                     script_sig: i.script_sig.to_bytes(),
                     txinwitness: i.witness.to_vec(),
-                    script_pub_key: bitcoin::Script::from_bytes(prev_tx_script_pubkey)
-                        .to_owned()
-                        .to_bytes(),
+                    script_pub_key: prevout.script_pubkey.to_bytes(),
                 }) {
                     Ok(Some(pubkey)) => {
                         outpoints
@@ -797,8 +783,8 @@ fn scan_single_block_for_silent_payments(
                         pubkeys.lock().unwrap().push(pubkey)
                     }
                     Ok(None) => (),
-                    Err(_) => (),
-                };
+                    Err(_) => {}
+                }
             });
 
             let binding = pubkeys.lock().unwrap();
@@ -832,6 +818,7 @@ fn scan_single_block_for_silent_payments(
 
     let mut index_block = IndexBlockVisitor {
         index,
+        daemon,
         value: &mut value,
         min_dust,
         tx_index,
