@@ -5,8 +5,10 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
+use rayon::prelude::*;
 use silentpayments::utils::receiving::recipient_calculate_tweak_data;
 use std::ops::ControlFlow;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -404,7 +406,7 @@ impl Index {
         chunk: &[NewHeader],
         sp: bool,
         min_dust: u64,
-        initial_sync_done: bool
+        initial_sync_done: bool,
     ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
@@ -415,7 +417,14 @@ impl Index {
             let scan_block = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block", || {
-                        index_single_block(self, blockhash, block, height, &mut batch, initial_sync_done);
+                        index_single_block(
+                            self,
+                            blockhash,
+                            block,
+                            height,
+                            &mut batch,
+                            initial_sync_done,
+                        );
                     });
                     self.stats.height.set("tip", height as f64);
                 };
@@ -425,17 +434,9 @@ impl Index {
         } else {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
-                    self.stats.observe_duration("block_sp", || {
-                        scan_single_block_for_silent_payments(
-                            self, height, blockhash, block, &mut batch, min_dust,
-                        );
-                    });
-                    self.stats.height.set("sp", height as f64);
-                    batch.sort();
-                    self.stats.observe_batch(&batch);
-                    self.stats
-                        .observe_duration("write", || self.store.write(&batch));
-                    self.stats.observe_db(&self.store);
+                    scan_single_block_for_silent_payments(
+                        self, height, blockhash, block, &mut batch, min_dust,
+                    );
                 };
             };
 
@@ -708,7 +709,7 @@ fn scan_single_block_for_silent_payments(
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
         fn visit_transaction(&mut self, tx: &bsl::Transaction) -> core::ops::ControlFlow<()> {
-            println!("tx_index: {}", self.tx_index);
+            info!("tx_index: {}", self.tx_index);
             self.tx_index += 1;
             let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
                 Ok(parsed_tx) => parsed_tx,
@@ -720,14 +721,17 @@ fn scan_single_block_for_silent_payments(
             };
 
             let txid = bsl_txid(tx);
+            info!("txid: {}", txid);
 
-            let mut output_pubkeys: Vec<u8> = Vec::with_capacity(parsed_tx.output.len());
+            // let self_arc_mutex = Arc::new(Mutex::new(self));
+            let output_pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
 
-            for (i, o) in parsed_tx.output.iter().enumerate() {
+            let i = Mutex::new(0);
+            parsed_tx.output.clone().into_par_iter().for_each(|o| {
                 if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
                     let outpoint = OutPoint {
                         txid,
-                        vout: i.try_into().expect("Unexpectedly high vout"),
+                        vout: *i.lock().unwrap(),
                     };
                     if self
                         .index
@@ -736,27 +740,42 @@ fn scan_single_block_for_silent_payments(
                         .next()
                         .is_none()
                     {
-                        output_pubkeys.extend(outpoint.vout.to_be_bytes());
-                        output_pubkeys.extend(o.value.to_sat().to_be_bytes());
-                        output_pubkeys.extend(o.script_pubkey.to_bytes());
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(outpoint.vout.to_be_bytes());
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(o.value.to_sat().to_be_bytes());
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(o.script_pubkey.to_bytes());
                     }
                 }
-            }
+                *i.lock().unwrap() += 1;
+            });
 
-            if output_pubkeys.is_empty() {
+            if output_pubkeys.lock().unwrap().is_empty() {
                 return ControlFlow::Continue(());
             }
 
-            let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
-            let mut outpoints: Vec<(String, u32)> = Vec::with_capacity(parsed_tx.input.len());
+            let pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
+            let outpoints = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
 
-            for i in parsed_tx.input.iter() {
+            info!("Itering");
+            parsed_tx.input.clone().into_par_iter().for_each(|i| {
                 let prev_txid = i.previous_output.txid;
-                outpoints.push((prev_txid.to_string(), i.previous_output.vout));
+                let prev_vout = i.previous_output.vout;
+                outpoints
+                    .lock()
+                    .unwrap()
+                    .push((prev_txid.to_string(), prev_vout));
 
                 let outpoint = OutPoint {
                     txid: prev_txid,
-                    vout: i.previous_output.vout,
+                    vout: prev_vout,
                 };
                 let prev_tx_script_pubkey = &self
                     .index
@@ -770,16 +789,20 @@ fn scan_single_block_for_silent_payments(
                     txinwitness: i.witness.to_vec(),
                     script_pub_key: prevout_script_pubkey.to_bytes(),
                 }) {
-                    Ok(Some(pubkey)) => pubkeys.push(pubkey),
+                    Ok(Some(pubkey)) => pubkeys.lock().unwrap().push(pubkey),
                     Ok(None) => (),
                     Err(_) => (),
                 };
-            }
+            });
 
-            let pubkeys_ref: Vec<&PublicKey> = pubkeys.iter().collect();
+            let binding = pubkeys.lock().unwrap();
+            let pubkeys_ref: Vec<&PublicKey> = binding.iter().collect();
 
             if !pubkeys_ref.is_empty() {
-                if let Some(tweak) = recipient_calculate_tweak_data(&pubkeys_ref, &outpoints).ok() {
+                info!("Tweaking");
+                if let Some(tweak) =
+                    recipient_calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()).ok()
+                {
                     let mut txid_value = [0u8; 32];
                     txid_value.copy_from_slice(&txid[..]);
                     txid_value.reverse();
@@ -787,11 +810,13 @@ fn scan_single_block_for_silent_payments(
                     self.value.extend(txid_value);
                     self.value.extend(&Vec::from_iter(tweak.serialize()));
 
-                    self.value.extend(&output_pubkeys.len().to_be_bytes());
-                    self.value.extend(&output_pubkeys);
+                    let outputs = output_pubkeys.lock().unwrap().clone();
+                    self.value.extend(outputs.len().to_be_bytes());
+                    self.value.extend(outputs);
                 }
             }
 
+            info!("Complete");
             ControlFlow::Continue(())
         }
     }
