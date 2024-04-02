@@ -723,12 +723,12 @@ fn scan_single_block_for_silent_payments(
             let txid = bsl_txid(tx);
             info!("txid: {}", txid);
 
-            // let self_arc_mutex = Arc::new(Mutex::new(self));
             let output_pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
 
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
-                if o.script_pubkey.is_p2tr() && o.value.to_sat() >= self.min_dust {
+                info!("Output: {:?}", o.script_pubkey);
+                if o.script_pubkey.is_p2tr() && o.value.to_sat() > self.min_dust {
                     let outpoint = OutPoint {
                         txid,
                         vout: *i.lock().unwrap(),
@@ -768,28 +768,34 @@ fn scan_single_block_for_silent_payments(
             parsed_tx.input.clone().into_par_iter().for_each(|i| {
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
-                outpoints
-                    .lock()
-                    .unwrap()
-                    .push((prev_txid.to_string(), prev_vout));
 
-                let outpoint = OutPoint {
-                    txid: prev_txid,
-                    vout: prev_vout,
-                };
-                let prev_tx_script_pubkey = &self
-                    .index
-                    .store
-                    .read_outpoint_script(SpendingPrefixRow::scan_prefix(outpoint))[0];
-                let prevout_script_pubkey =
-                    bitcoin::Script::from_bytes(prev_tx_script_pubkey).to_owned();
+                let prev_tx_script_pubkey =
+                    &self
+                        .index
+                        .store
+                        .read_outpoint_script(SpendingPrefixRow::scan_prefix(OutPoint {
+                            txid: prev_txid,
+                            vout: prev_vout,
+                        }))[0];
+
+                if prev_tx_script_pubkey.is_empty() {
+                    return;
+                }
 
                 match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
                     script_sig: i.script_sig.to_bytes(),
                     txinwitness: i.witness.to_vec(),
-                    script_pub_key: prevout_script_pubkey.to_bytes(),
+                    script_pub_key: bitcoin::Script::from_bytes(prev_tx_script_pubkey)
+                        .to_owned()
+                        .to_bytes(),
                 }) {
-                    Ok(Some(pubkey)) => pubkeys.lock().unwrap().push(pubkey),
+                    Ok(Some(pubkey)) => {
+                        outpoints
+                            .lock()
+                            .unwrap()
+                            .push((prev_txid.to_string(), prev_vout));
+                        pubkeys.lock().unwrap().push(pubkey)
+                    }
                     Ok(None) => (),
                     Err(_) => (),
                 };
