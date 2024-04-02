@@ -179,42 +179,45 @@ impl Index {
         exit_flag: &ExitFlag,
         sp_begin_height: Option<usize>,
         sp_min_dust: Option<usize>,
+        sp_skip_height: Option<usize>,
     ) -> Result<bool> {
-        let start: usize;
+        let mut start = sp_skip_height.unwrap_or(0);
         let initial_height = sp_begin_height.unwrap_or(70_000);
 
         self.flush_needed = true;
 
-        if let Some(row) = self.store.last_sp() {
-            match deserialize::<BlockHash>(&row) {
-                Ok(blockhash) => {
-                    start = self
-                        .chain
-                        .get_block_height(&blockhash)
-                        .unwrap_or(initial_height - 1)
-                        + 1;
-                }
-                Err(_) => {
-                    start = self
-                        .store
-                        .read_last_tweak()
-                        .into_iter()
-                        .filter_map(|(blockhash, _)| {
-                            Some(match deserialize::<BlockHash>(&blockhash) {
-                                Ok(blockhash) => {
-                                    self.chain
-                                        .get_block_height(&blockhash)
-                                        .unwrap_or(initial_height - 1)
-                                        + 1
-                                }
-                                Err(_) => initial_height,
+        if start == 0 {
+            if let Some(row) = self.store.last_sp() {
+                match deserialize::<BlockHash>(&row) {
+                    Ok(blockhash) => {
+                        start = self
+                            .chain
+                            .get_block_height(&blockhash)
+                            .unwrap_or(initial_height - 1)
+                            + 1;
+                    }
+                    Err(_) => {
+                        start = self
+                            .store
+                            .read_last_tweak()
+                            .into_iter()
+                            .filter_map(|(blockhash, _)| {
+                                Some(match deserialize::<BlockHash>(&blockhash) {
+                                    Ok(blockhash) => {
+                                        self.chain
+                                            .get_block_height(&blockhash)
+                                            .unwrap_or(initial_height - 1)
+                                            + 1
+                                    }
+                                    Err(_) => initial_height,
+                                })
                             })
-                        })
-                        .collect::<Vec<_>>()[0];
-                }
-            };
-        } else {
-            start = initial_height;
+                            .collect::<Vec<_>>()[0];
+                    }
+                };
+            } else {
+                start = initial_height;
+            }
         }
 
         let new_header = self
@@ -233,7 +236,7 @@ impl Index {
                 .and_then(|dust| u64::try_from(dust).ok())
                 .unwrap_or(0);
 
-            self.sync_blocks(daemon, &[new_header], true, min_dust)?;
+            self.sync_blocks(daemon, &[new_header], true, min_dust, !self.flush_needed)?;
         } else {
             if self.flush_needed {
                 self.store.flush(); // full compaction is performed on the first flush call
@@ -363,6 +366,7 @@ impl Index {
 
     // Return `Ok(true)` when the chain is fully synced and the index is compacted.
     pub(crate) fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) -> Result<bool> {
+        self.flush_needed = true;
         let new_headers = self
             .stats
             .observe_duration("headers", || daemon.get_new_headers(&self.chain))?;
@@ -387,11 +391,10 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, false, 0)?;
+            self.sync_blocks(daemon, chunk, false, 0, !self.flush_needed)?;
         }
         self.chain.update(new_headers);
         self.stats.observe_chain(&self.chain);
-        self.flush_needed = true;
         Ok(false) // sync is not done
     }
 
@@ -401,6 +404,7 @@ impl Index {
         chunk: &[NewHeader],
         sp: bool,
         min_dust: u64,
+        initial_sync_done: bool
     ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
@@ -411,7 +415,7 @@ impl Index {
             let scan_block = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block", || {
-                        index_single_block(self, blockhash, block, height, &mut batch);
+                        index_single_block(self, blockhash, block, height, &mut batch, initial_sync_done);
                     });
                     self.stats.height.set("tip", height as f64);
                 };
@@ -461,11 +465,13 @@ fn index_single_block(
     block: SerBlock,
     height: usize,
     batch: &mut WriteBatch,
+    initial_sync_done: bool,
 ) {
     struct IndexBlockVisitor<'a> {
         index: &'a Index,
         batch: &'a mut WriteBatch,
         height: usize,
+        initial_sync_done: bool,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -520,137 +526,142 @@ fn index_single_block(
             let row = SpendingPrefixRow::row(prevout, self.height);
             self.batch.spending_rows.push(row.to_db_row());
 
-            // let prev_tx_script_pubkey = &self
-            //     .index
-            //     .store
-            //     .read_outpoint_script(SpendingPrefixRow::scan_prefix(prevout));
+            // if self.initial_sync_done {
+            if true {
+                return ControlFlow::Continue(());
+            }
 
-            // if prev_tx_script_pubkey.is_empty() {
-            //     return ControlFlow::Continue(());
-            // }
+            let prev_tx_script_pubkey = &self
+                .index
+                .store
+                .read_outpoint_script(SpendingPrefixRow::scan_prefix(prevout));
 
-            // let prev_tx_script_pubkey = &prev_tx_script_pubkey[0];
+            if prev_tx_script_pubkey.is_empty() {
+                return ControlFlow::Continue(());
+            }
 
-            // let prevout_script_pubkey =
-            //     bitcoin::Script::from_bytes(&prev_tx_script_pubkey).to_owned();
+            let prev_tx_script_pubkey = &prev_tx_script_pubkey[0];
 
-            // if prevout_script_pubkey.is_empty() || !prevout_script_pubkey.is_p2tr() {
-            //     return ControlFlow::Continue(());
-            // }
+            let prevout_script_pubkey =
+                bitcoin::Script::from_bytes(&prev_tx_script_pubkey).to_owned();
 
-            // let prev_txid = Txid::from_slice(&prevout.txid[..]).unwrap();
-            // let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-            // let prev_block_height = prev_block_hash.and_then(|block_hash| {
-            //     self.index
-            //         .chain
-            //         .get_block_height(&block_hash)
-            //         .and_then(|height| u64::try_from(height).ok().and_then(|height| Some(height)))
-            // });
-            // let prev_get_tweaks = prev_block_height
-            //     .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
+            if prevout_script_pubkey.is_empty() || !prevout_script_pubkey.is_p2tr() {
+                return ControlFlow::Continue(());
+            }
 
-            // if prev_get_tweaks.is_none() {
-            //     return ControlFlow::Continue(());
-            // }
+            let prev_txid = Txid::from_slice(&prevout.txid[..]).unwrap();
+            let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
+            let prev_block_height = prev_block_hash.and_then(|block_hash| {
+                self.index
+                    .chain
+                    .get_block_height(&block_hash)
+                    .and_then(|height| u64::try_from(height).ok().and_then(|height| Some(height)))
+            });
+            let prev_get_tweaks = prev_block_height
+                .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
 
-            // let mut should_update_entry = false;
-            // let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
+            if prev_get_tweaks.is_none() {
+                return ControlFlow::Continue(());
+            }
 
-            // let _: Vec<_> = prev_get_tweaks
-            //     .unwrap()
-            //     .filter_map(|(_block_height_vec, data)| {
-            //         if !data.is_empty() {
-            //             let mut chunk = 0;
+            let mut should_update_entry = false;
+            let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
 
-            //             while data.len() > chunk {
-            //                 let mut txid = [0u8; 32];
-            //                 if data.len() < chunk + 32 {
-            //                     return None;
-            //                 }
-            //                 txid.copy_from_slice(&data[chunk..chunk + 32]);
-            //                 chunk += 32;
+            let _: Vec<_> = prev_get_tweaks
+                .unwrap()
+                .filter_map(|(_block_height_vec, data)| {
+                    if !data.is_empty() {
+                        let mut chunk = 0;
 
-            //                 value.extend(txid);
+                        while data.len() > chunk {
+                            let mut txid = [0u8; 32];
+                            if data.len() < chunk + 32 {
+                                return None;
+                            }
+                            txid.copy_from_slice(&data[chunk..chunk + 32]);
+                            chunk += 32;
 
-            //                 let mut tweak = [0u8; 33];
-            //                 tweak.copy_from_slice(&data[chunk..chunk + 33]);
-            //                 chunk += 33;
-            //                 value.extend(&tweak.to_vec());
+                            value.extend(txid);
 
-            //                 let mut output_pubkeys_len = [0u8; 8];
-            //                 output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
-            //                 chunk += 8;
+                            let mut tweak = [0u8; 33];
+                            tweak.copy_from_slice(&data[chunk..chunk + 33]);
+                            chunk += 33;
+                            value.extend(&tweak.to_vec());
 
-            //                 let chunk_size = 46;
+                            let mut output_pubkeys_len = [0u8; 8];
+                            output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
+                            chunk += 8;
 
-            //                 let mut output_pubkeys: Vec<u8> = Vec::new();
+                            let chunk_size = 46;
 
-            //                 data[chunk..]
-            //                     .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
-            //                     .next()?
-            //                     .chunks(chunk_size)
-            //                     .for_each(|pubkey| {
-            //                         let mut pubkey_chunk = 0;
+                            let mut output_pubkeys: Vec<u8> = Vec::new();
 
-            //                         let mut vout = [0u8; 4];
-            //                         if pubkey.len() < 4 {
-            //                             return;
-            //                         }
-            //                         vout.copy_from_slice(&pubkey[..4]);
-            //                         pubkey_chunk += 4;
+                            data[chunk..]
+                                .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
+                                .next()?
+                                .chunks(chunk_size)
+                                .for_each(|pubkey| {
+                                    let mut pubkey_chunk = 0;
 
-            //                         let mut amount = [0u8; 8];
-            //                         amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
-            //                         pubkey_chunk += 8;
+                                    let mut vout = [0u8; 4];
+                                    if pubkey.len() < 4 {
+                                        return;
+                                    }
+                                    vout.copy_from_slice(&pubkey[..4]);
+                                    pubkey_chunk += 4;
 
-            //                         let pubkey_hex = &pubkey[pubkey_chunk + 2..];
-            //                         pubkey_chunk += 34;
-            //                         chunk += pubkey_chunk;
+                                    let mut amount = [0u8; 8];
+                                    amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
+                                    pubkey_chunk += 8;
 
-            //                         let output_pubkey = {
-            //                             if u32::from_be_bytes(vout).to_string()
-            //                                 == prevout.vout.to_string()
-            //                                 && prevout_script_pubkey
-            //                                     .to_hex_string()
-            //                                     .rfind(pubkey_hex.as_hex().to_string().as_str())
-            //                                     == Some(4)
-            //                             {
-            //                                 should_update_entry = true;
-            //                                 None
-            //                             } else {
-            //                                 Some(pubkey.to_vec())
-            //                             }
-            //                         };
+                                    let pubkey_hex = &pubkey[pubkey_chunk + 2..];
+                                    pubkey_chunk += 34;
+                                    chunk += pubkey_chunk;
 
-            //                         if let Some(output_pubkey) = output_pubkey {
-            //                             output_pubkeys.extend(output_pubkey);
-            //                         }
-            //                     });
+                                    let output_pubkey = {
+                                        if u32::from_be_bytes(vout).to_string()
+                                            == prevout.vout.to_string()
+                                            && prevout_script_pubkey
+                                                .to_hex_string()
+                                                .rfind(pubkey_hex.as_hex().to_string().as_str())
+                                                == Some(4)
+                                        {
+                                            should_update_entry = true;
+                                            None
+                                        } else {
+                                            Some(pubkey.to_vec())
+                                        }
+                                    };
 
-            //                 let should_skip = {
-            //                     if should_update_entry {
-            //                         output_pubkeys.is_empty()
-            //                     } else {
-            //                         false
-            //                     }
-            //                 };
+                                    if let Some(output_pubkey) = output_pubkey {
+                                        output_pubkeys.extend(output_pubkey);
+                                    }
+                                });
 
-            //                 if !should_skip {
-            //                     value.extend(output_pubkeys.len().to_be_bytes());
-            //                     value.extend(output_pubkeys);
-            //                 }
-            //             }
+                            let should_skip = {
+                                if should_update_entry {
+                                    output_pubkeys.is_empty()
+                                } else {
+                                    false
+                                }
+                            };
 
-            //             Some(())
-            //         } else {
-            //             None
-            //         }
-            //     })
-            //     .collect();
+                            if !should_skip {
+                                value.extend(output_pubkeys.len().to_be_bytes());
+                                value.extend(output_pubkeys);
+                            }
+                        }
 
-            // if should_update_entry == true {
-            //     self.batch.tweak_rows.push(value.into_boxed_slice());
-            // };
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if should_update_entry == true {
+                self.batch.tweak_rows.push(value.into_boxed_slice());
+            };
             ControlFlow::Continue(())
         }
 
@@ -671,6 +682,7 @@ fn index_single_block(
         index,
         batch,
         height,
+        initial_sync_done,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}
@@ -691,10 +703,13 @@ fn scan_single_block_for_silent_payments(
         index: &'a Index,
         min_dust: u64,
         value: &'a mut Vec<u8>,
+        tx_index: usize,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
         fn visit_transaction(&mut self, tx: &bsl::Transaction) -> core::ops::ControlFlow<()> {
+            println!("tx_index: {}", self.tx_index);
+            self.tx_index += 1;
             let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
                 Ok(parsed_tx) => parsed_tx,
                 Err(_) => return ControlFlow::Continue(()),
@@ -735,7 +750,6 @@ fn scan_single_block_for_silent_payments(
             let mut pubkeys: Vec<PublicKey> = Vec::with_capacity(parsed_tx.input.len());
             let mut outpoints: Vec<(String, u32)> = Vec::with_capacity(parsed_tx.input.len());
 
-            println!("txid: {}", txid.to_string());
             for i in parsed_tx.input.iter() {
                 let prev_txid = i.previous_output.txid;
                 outpoints.push((prev_txid.to_string(), i.previous_output.vout));
@@ -783,11 +797,13 @@ fn scan_single_block_for_silent_payments(
     }
 
     let mut value = block_height.to_be_bytes().to_vec();
+    let tx_index = 0;
 
     let mut index_block = IndexBlockVisitor {
         index,
         value: &mut value,
         min_dust,
+        tx_index,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}

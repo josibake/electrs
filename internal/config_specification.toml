@@ -155,3 +155,8 @@ doc = "Start height for Silent Payments indexing (default: 0)"
 name = "sp_min_dust"
 type = "usize"
 doc = "Minimum dust value for Silent Payments indexing (default: 546)"
+
+[[param]]
+name = "sp_skip_height"
+type = "usize"
+doc = "Height for Silent Payments indexing to skip to, if not yet reached (default: 0)"

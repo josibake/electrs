@@ -129,6 +129,7 @@ pub struct Rpc {
     port: u16,
     sp_begin_height: Option<usize>,
     sp_min_dust: Option<usize>,
+    sp_skip_height: Option<usize>,
 }
 
 impl Rpc {
@@ -155,6 +156,7 @@ impl Rpc {
             port: config.electrum_rpc_addr.port(),
             sp_begin_height: config.sp_begin_height,
             sp_min_dust: config.sp_min_dust,
+            sp_skip_height: config.sp_skip_height,
         })
     }
 
@@ -172,6 +174,7 @@ impl Rpc {
             self.signal.exit_flag(),
             self.sp_begin_height,
             self.sp_min_dust,
+            self.sp_skip_height,
         )
     }
 

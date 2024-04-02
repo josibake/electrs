@@ -77,12 +77,17 @@ impl Tracker {
         exit_flag: &ExitFlag,
         sp_begin_height: Option<usize>,
         sp_min_dust: Option<usize>,
+        sp_skip_height: Option<usize>,
     ) -> Result<bool> {
         let mut done = self.index.sync(daemon, exit_flag)?;
         if done {
-            done =
-                self.index
-                    .silent_payments_sync(daemon, exit_flag, sp_begin_height, sp_min_dust)?;
+            done = self.index.silent_payments_sync(
+                daemon,
+                exit_flag,
+                sp_begin_height,
+                sp_min_dust,
+                sp_skip_height,
+            )?;
         }
         if done && !self.ignore_mempool {
             self.mempool.sync(daemon, exit_flag);
