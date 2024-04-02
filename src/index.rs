@@ -707,7 +707,7 @@ fn scan_single_block_for_silent_payments(
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
                 let amount = o.value.to_sat();
-                if o.script_pubkey.is_p2tr() && amount > self.min_dust {
+                if o.script_pubkey.is_p2tr() && amount >= self.min_dust {
                     let is_unspent = self
                         .daemon
                         .get_tx_out(&txid, *i.lock().unwrap())
