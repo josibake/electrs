@@ -730,22 +730,32 @@ fn scan_single_block_for_silent_payments(
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
                 info!("Output: {:?}", o.script_pubkey);
-                let outpoint = OutPoint {
-                    txid,
-                    vout: *i.lock().unwrap(),
-                };
-                output_pubkeys
-                    .lock()
-                    .unwrap()
-                    .extend(outpoint.vout.to_be_bytes());
-                output_pubkeys
-                    .lock()
-                    .unwrap()
-                    .extend(o.value.to_sat().to_be_bytes());
-                output_pubkeys
-                    .lock()
-                    .unwrap()
-                    .extend(o.script_pubkey.to_bytes());
+                if o.script_pubkey.is_p2tr() && o.value.to_sat() > self.min_dust {
+                    let outpoint = OutPoint {
+                        txid,
+                        vout: *i.lock().unwrap(),
+                    };
+                    if self
+                        .index
+                        .store
+                        .iter_spending(SpendingPrefixRow::scan_prefix(outpoint))
+                        .next()
+                        .is_none()
+                    {
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(outpoint.vout.to_be_bytes());
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(o.value.to_sat().to_be_bytes());
+                        output_pubkeys
+                            .lock()
+                            .unwrap()
+                            .extend(o.script_pubkey.to_bytes());
+                    }
+                }
                 *i.lock().unwrap() += 1;
             });
 
