@@ -736,7 +736,6 @@ fn scan_single_block_for_silent_payments(
             let pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
             let outpoints = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
 
-            info!("Itering");
             parsed_tx.input.clone().into_par_iter().for_each(|i| {
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
@@ -771,7 +770,6 @@ fn scan_single_block_for_silent_payments(
             let pubkeys_ref: Vec<&PublicKey> = binding.iter().collect();
 
             if !pubkeys_ref.is_empty() {
-                info!("Tweaking");
                 if let Some(tweak) =
                     recipient_calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()).ok()
                 {
@@ -788,7 +786,6 @@ fn scan_single_block_for_silent_payments(
                 }
             }
 
-            info!("Complete");
             ControlFlow::Continue(())
         }
     }
