@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
-use bitcoin::hashes::Hash;
-use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
@@ -10,6 +8,7 @@ use silentpayments::utils::receiving::recipient_calculate_tweak_data;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
+use crate::sp::{TweakBlockData, TweakData, VoutData};
 use crate::{
     chain::{Chain, NewHeader},
     daemon::Daemon,
@@ -93,6 +92,7 @@ pub struct Index {
     stats: Stats,
     is_ready: bool,
     flush_needed: bool,
+    initial_sync_done: bool,
 }
 
 impl Index {
@@ -129,6 +129,7 @@ impl Index {
             stats,
             is_ready: false,
             flush_needed: false,
+            initial_sync_done: false,
         })
     }
 
@@ -183,40 +184,46 @@ impl Index {
         sp_min_dust: Option<usize>,
         sp_skip_height: Option<usize>,
     ) -> Result<bool> {
-        let mut start = sp_skip_height.unwrap_or(0);
+        let start: usize;
         let initial_height = sp_begin_height.unwrap_or(70_000);
 
-        self.flush_needed = true;
-
-        if start == 0 {
+        if let Some(sp_skip_height) = sp_skip_height {
+            start = sp_skip_height;
+        } else {
             if let Some(row) = self.store.last_sp() {
-                match deserialize::<BlockHash>(&row) {
-                    Ok(blockhash) => {
-                        start = self
-                            .chain
+                let blockhash = deserialize::<BlockHash>(&row).ok().and_then(|blockhash| {
+                    Some(
+                        self.chain
                             .get_block_height(&blockhash)
                             .unwrap_or(initial_height - 1)
-                            + 1;
-                    }
-                    Err(_) => {
-                        start = self
-                            .store
-                            .read_last_tweak()
-                            .into_iter()
-                            .filter_map(|(blockhash, _)| {
-                                Some(match deserialize::<BlockHash>(&blockhash) {
-                                    Ok(blockhash) => {
-                                        self.chain
-                                            .get_block_height(&blockhash)
-                                            .unwrap_or(initial_height - 1)
-                                            + 1
-                                    }
-                                    Err(_) => initial_height,
-                                })
-                            })
-                            .collect::<Vec<_>>()[0];
-                    }
-                };
+                            + 1,
+                    )
+                });
+
+                if let Some(blockhash) = blockhash {
+                    start = blockhash;
+                } else {
+                    start = self
+                        .store
+                        .read_last_tweak()
+                        .into_iter()
+                        .filter_map(|(blockhash, _)| {
+                            Some(
+                                deserialize::<BlockHash>(&blockhash)
+                                    .ok()
+                                    .and_then(|blockhash| {
+                                        Some(
+                                            self.chain
+                                                .get_block_height(&blockhash)
+                                                .unwrap_or(initial_height - 1)
+                                                + 1,
+                                        )
+                                    })
+                                    .unwrap_or(initial_height),
+                            )
+                        })
+                        .collect::<Vec<_>>()[0];
+                }
             } else {
                 start = initial_height;
             }
@@ -236,9 +243,9 @@ impl Index {
 
             let min_dust = sp_min_dust
                 .and_then(|dust| u64::try_from(dust).ok())
-                .unwrap_or(0);
+                .unwrap_or(546);
 
-            self.sync_blocks(daemon, &[new_header], true, min_dust, !self.flush_needed)?;
+            self.sync_blocks(daemon, &[new_header], true, min_dust)?;
         } else {
             if self.flush_needed {
                 self.store.flush(); // full compaction is performed on the first flush call
@@ -251,6 +258,7 @@ impl Index {
             return Ok(true); // no more blocks to index (done for now)
         }
 
+        self.flush_needed = true;
         Ok(false) // sync is not done
     }
 
@@ -261,100 +269,52 @@ impl Index {
             .store
             .read_tweaks(height as u64, count as u64)
             .into_iter()
-            .filter_map(|(block_height_vec, data)| {
+            .filter_map(|(key, data)| {
                 if !data.is_empty() {
-                    let mut chunk = 0;
+                    let tweak_block_data =
+                        TweakBlockData::from_boxed_slice(key.clone(), data.clone());
+                    let mut block_response_map = serde_json::Map::new();
 
-                    while data.len() > chunk {
-                        let mut obj = serde_json::Map::new();
+                    for tweak_data in tweak_block_data.tx_data {
+                        let mut tx_response_map = serde_json::Map::new();
 
-                        let mut txid = [0u8; 32];
-                        txid.copy_from_slice(&data[chunk..chunk + 32]);
-                        chunk += 32;
-                        txid.reverse();
-
-                        let mut tweak = [0u8; 33];
-                        tweak.copy_from_slice(&data[chunk..chunk + 33]);
-                        chunk += 33;
-                        obj.insert(
+                        tx_response_map.insert(
                             "tweak".to_string(),
-                            serde_json::Value::String(tweak.as_hex().to_string()),
+                            serde_json::Value::String(tweak_data.tweak.to_string()),
+                        );
+                        tx_response_map.insert(
+                            "output_pubkeys".to_string(),
+                            serde_json::Value::Object(serde_json::Map::new()),
                         );
 
-                        let mut output_pubkeys_len = [0u8; 8];
-                        output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
-                        chunk += 8;
-
-                        let chunk_size = 46;
-
-                        data[chunk..]
-                            .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
-                            .next()?
-                            .chunks(chunk_size)
-                            .for_each(|pubkey| {
-                                let mut pubkey_chunk = 0;
-
-                                let mut vout = [0u8; 4];
-                                vout.copy_from_slice(&pubkey[..4]);
-                                pubkey_chunk += 4;
-
-                                let mut amount = [0u8; 8];
-                                amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
-                                pubkey_chunk += 8;
-
-                                let pubkey_hex = serde_json::Value::String(
-                                    pubkey[pubkey_chunk + 2..].as_hex().to_string(),
-                                );
-                                pubkey_chunk += 34;
-                                chunk += pubkey_chunk;
-
-                                if let Some(value) = obj.get_mut("output_pubkeys") {
-                                    if let Some(vout_map) = value.as_object_mut() {
-                                        vout_map.insert(
-                                            u32::from_be_bytes(vout).to_string(),
-                                            serde_json::json!({
-                                                "pubkey": pubkey_hex,
-                                                "amount": u64::from_be_bytes(amount).to_string()
-                                            }),
-                                        );
-                                    };
-                                } else {
-                                    let mut vout_map = serde_json::Map::new();
+                        if let Some(vout_map) = tx_response_map.get_mut("output_pubkeys") {
+                            if let Some(vout_map) = vout_map.as_object_mut() {
+                                for vout in tweak_data.vout_data {
                                     vout_map.insert(
-                                        u32::from_be_bytes(vout).to_string(),
-                                        serde_json::json!({
-                                            "pubkey": pubkey_hex,
-                                            "amount": u64::from_be_bytes(amount).to_string()
-                                        }),
-                                    );
-
-                                    obj.insert(
-                                        "output_pubkeys".to_string(),
-                                        serde_json::Value::Object(vout_map),
+                                        vout.vout.to_string(),
+                                        serde_json::Value::Array(vec![
+                                            serde_json::Value::String(
+                                                vout.script_pub_key
+                                                    .to_hex_string()
+                                                    .replace("5120", ""),
+                                            ),
+                                            serde_json::Value::Number(vout.amount.into()),
+                                        ]),
                                     );
                                 }
-                            });
-
-                        let mut height_value = [0u8; 8];
-                        height_value.copy_from_slice(&block_height_vec);
-                        let height = u64::from_be_bytes(height_value);
-
-                        if let Some(value) = map.get_mut(&height.to_string()) {
-                            if let Some(value_map) = value.as_object_mut() {
-                                value_map.insert(
-                                    Txid::from_byte_array(txid).to_string(),
-                                    serde_json::Value::Object(obj),
-                                );
                             }
-                        } else {
-                            let mut new_map = serde_json::Map::new();
-                            new_map.insert(
-                                Txid::from_byte_array(txid).to_string(),
-                                serde_json::Value::Object(obj),
-                            );
-                            map.insert(height.to_string(), serde_json::Value::Object(new_map));
                         }
+
+                        block_response_map.insert(
+                            tweak_data.txid.to_string(),
+                            serde_json::Value::Object(tx_response_map),
+                        );
                     }
+
+                    map.insert(
+                        height.to_string(),
+                        serde_json::Value::Object(block_response_map),
+                    );
 
                     Some(())
                 } else {
@@ -367,8 +327,12 @@ impl Index {
     }
 
     // Return `Ok(true)` when the chain is fully synced and the index is compacted.
-    pub(crate) fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) -> Result<bool> {
-        self.flush_needed = true;
+    pub(crate) fn sync(
+        &mut self,
+        daemon: &Daemon,
+        exit_flag: &ExitFlag,
+        sp_min_dust: Option<usize>,
+    ) -> Result<bool> {
         let new_headers = self
             .stats
             .observe_duration("headers", || daemon.get_new_headers(&self.chain))?;
@@ -383,6 +347,9 @@ impl Index {
                 );
             }
             _ => {
+                if !self.initial_sync_done {
+                    self.initial_sync_done = true;
+                }
                 return Ok(true); // no more blocks to index (done for now)
             }
         }
@@ -393,7 +360,11 @@ impl Index {
                     chunk.first().unwrap().height()
                 )
             })?;
-            self.sync_blocks(daemon, chunk, false, 0, !self.flush_needed)?;
+            let min_dust = sp_min_dust
+                .and_then(|dust| u64::try_from(dust).ok())
+                .unwrap_or(0);
+
+            self.sync_blocks(daemon, chunk, false, min_dust)?;
         }
         self.chain.update(new_headers);
         self.stats.observe_chain(&self.chain);
@@ -406,11 +377,9 @@ impl Index {
         chunk: &[NewHeader],
         sp: bool,
         min_dust: u64,
-        initial_sync_done: bool,
     ) -> Result<()> {
         let blockhashes: Vec<BlockHash> = chunk.iter().map(|h| h.hash()).collect();
         let mut heights = chunk.iter().map(|h| h.height());
-
         let mut batch = WriteBatch::default();
 
         if !sp {
@@ -418,12 +387,7 @@ impl Index {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block", || {
                         index_single_block(
-                            self,
-                            blockhash,
-                            block,
-                            height,
-                            &mut batch,
-                            initial_sync_done,
+                            self, daemon, blockhash, block, height, &mut batch, min_dust,
                         );
                     });
                     self.stats.height.set("tip", height as f64);
@@ -462,17 +426,19 @@ fn db_rows_size(rows: &[Row]) -> usize {
 
 fn index_single_block(
     index: &Index,
+    daemon: &Daemon,
     block_hash: BlockHash,
     block: SerBlock,
     height: usize,
     batch: &mut WriteBatch,
-    initial_sync_done: bool,
+    min_dust: u64,
 ) {
     struct IndexBlockVisitor<'a> {
         index: &'a Index,
+        daemon: &'a Daemon,
         batch: &'a mut WriteBatch,
         height: usize,
-        initial_sync_done: bool,
+        min_dust: u64,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -481,6 +447,101 @@ fn index_single_block(
             self.batch
                 .txid_rows
                 .push(TxidRow::row(txid, self.height).to_db_row());
+
+            if !self.index.initial_sync_done {
+                return ControlFlow::Continue(());
+            }
+
+            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
+                Ok(parsed_tx) => parsed_tx,
+                Err(_) => return ControlFlow::Continue(()),
+            };
+
+            if parsed_tx.is_coinbase() {
+                return ControlFlow::Continue(());
+            };
+
+            for i in parsed_tx.input.iter() {
+                let prev_txid = i.previous_output.txid;
+                let prev_vout = i.previous_output.vout;
+
+                let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
+                let prevout: Option<bitcoin::TxOut> = prev_tx.and_then(|prev_tx| {
+                    let index: Option<usize> = prev_vout.try_into().ok();
+                    index.and_then(move |index| prev_tx.output.get(index).cloned())
+                });
+
+                if let None = prevout {
+                    return ControlFlow::Continue(());
+                }
+
+                let prevout = prevout.unwrap();
+
+                if !prevout.script_pubkey.is_p2tr() || prevout.value.to_sat() < self.min_dust {
+                    return ControlFlow::Continue(());
+                }
+
+                let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
+                let prev_block_height = prev_block_hash.and_then(|block_hash| {
+                    self.index
+                        .chain
+                        .get_block_height(&block_hash)
+                        .and_then(|height| {
+                            u64::try_from(height).ok().and_then(|height| Some(height))
+                        })
+                });
+                let prev_get_tweaks = prev_block_height
+                    .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
+
+                if prev_get_tweaks.is_none() {
+                    return ControlFlow::Continue(());
+                }
+
+                let _: Vec<_> = prev_get_tweaks
+                    .unwrap()
+                    .filter_map(|(key, data)| {
+                        if !data.is_empty() {
+                            let mut tweak_block_data =
+                                TweakBlockData::from_boxed_slice(key.clone(), data.clone());
+
+                            let mut update_entry = false;
+
+                            tweak_block_data.tx_data.retain(|tweak_data| {
+                                let mut new_vout_data = vec![];
+
+                                tweak_data.vout_data.iter().for_each(|vout| {
+                                    if vout.vout.to_string() == prev_vout.to_string()
+                                        && prevout.script_pubkey.to_hex_string()
+                                            == vout.script_pub_key.to_hex_string()
+                                    {
+                                        // Found an output being used in this tx as input, should
+                                        // update tweak db
+                                        update_entry = true;
+                                    } else {
+                                        new_vout_data.push(vout.clone().to_owned());
+                                    }
+                                });
+
+                                if new_vout_data.len() > 0 {
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+
+                            if update_entry {
+                                self.batch
+                                    .tweak_rows
+                                    .push(tweak_block_data.clone().into_boxed_slice());
+                            }
+
+                            Some(())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+            }
 
             ControlFlow::Continue(())
         }
@@ -506,142 +567,6 @@ fn index_single_block(
             let row = SpendingPrefixRow::row(prevout, self.height);
             self.batch.spending_rows.push(row.to_db_row());
 
-            // if self.initial_sync_done {
-            if true {
-                return ControlFlow::Continue(());
-            }
-
-            let prev_tx_script_pubkey = &self
-                .index
-                .store
-                .read_outpoint_script(SpendingPrefixRow::scan_prefix(prevout));
-
-            if prev_tx_script_pubkey.is_empty() {
-                return ControlFlow::Continue(());
-            }
-
-            let prev_tx_script_pubkey = &prev_tx_script_pubkey[0];
-
-            let prevout_script_pubkey =
-                bitcoin::Script::from_bytes(&prev_tx_script_pubkey).to_owned();
-
-            if prevout_script_pubkey.is_empty() || !prevout_script_pubkey.is_p2tr() {
-                return ControlFlow::Continue(());
-            }
-
-            let prev_txid = Txid::from_slice(&prevout.txid[..]).unwrap();
-            let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-            let prev_block_height = prev_block_hash.and_then(|block_hash| {
-                self.index
-                    .chain
-                    .get_block_height(&block_hash)
-                    .and_then(|height| u64::try_from(height).ok().and_then(|height| Some(height)))
-            });
-            let prev_get_tweaks = prev_block_height
-                .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
-
-            if prev_get_tweaks.is_none() {
-                return ControlFlow::Continue(());
-            }
-
-            let mut should_update_entry = false;
-            let mut value = prev_block_height.unwrap().to_be_bytes().to_vec();
-
-            let _: Vec<_> = prev_get_tweaks
-                .unwrap()
-                .filter_map(|(_block_height_vec, data)| {
-                    if !data.is_empty() {
-                        let mut chunk = 0;
-
-                        while data.len() > chunk {
-                            let mut txid = [0u8; 32];
-                            if data.len() < chunk + 32 {
-                                return None;
-                            }
-                            txid.copy_from_slice(&data[chunk..chunk + 32]);
-                            chunk += 32;
-
-                            value.extend(txid);
-
-                            let mut tweak = [0u8; 33];
-                            tweak.copy_from_slice(&data[chunk..chunk + 33]);
-                            chunk += 33;
-                            value.extend(&tweak.to_vec());
-
-                            let mut output_pubkeys_len = [0u8; 8];
-                            output_pubkeys_len.copy_from_slice(&data[chunk..chunk + 8]);
-                            chunk += 8;
-
-                            let chunk_size = 46;
-
-                            let mut output_pubkeys: Vec<u8> = Vec::new();
-
-                            data[chunk..]
-                                .chunks(u64::from_be_bytes(output_pubkeys_len) as usize)
-                                .next()?
-                                .chunks(chunk_size)
-                                .for_each(|pubkey| {
-                                    let mut pubkey_chunk = 0;
-
-                                    let mut vout = [0u8; 4];
-                                    if pubkey.len() < 4 {
-                                        return;
-                                    }
-                                    vout.copy_from_slice(&pubkey[..4]);
-                                    pubkey_chunk += 4;
-
-                                    let mut amount = [0u8; 8];
-                                    amount.copy_from_slice(&pubkey[pubkey_chunk..pubkey_chunk + 8]);
-                                    pubkey_chunk += 8;
-
-                                    let pubkey_hex = &pubkey[pubkey_chunk + 2..];
-                                    pubkey_chunk += 34;
-                                    chunk += pubkey_chunk;
-
-                                    let output_pubkey = {
-                                        if u32::from_be_bytes(vout).to_string()
-                                            == prevout.vout.to_string()
-                                            && prevout_script_pubkey
-                                                .to_hex_string()
-                                                .rfind(pubkey_hex.as_hex().to_string().as_str())
-                                                == Some(4)
-                                        {
-                                            should_update_entry = true;
-                                            None
-                                        } else {
-                                            Some(pubkey.to_vec())
-                                        }
-                                    };
-
-                                    if let Some(output_pubkey) = output_pubkey {
-                                        output_pubkeys.extend(output_pubkey);
-                                    }
-                                });
-
-                            let should_skip = {
-                                if should_update_entry {
-                                    output_pubkeys.is_empty()
-                                } else {
-                                    false
-                                }
-                            };
-
-                            if !should_skip {
-                                value.extend(output_pubkeys.len().to_be_bytes());
-                                value.extend(output_pubkeys);
-                            }
-                        }
-
-                        Some(())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if should_update_entry == true {
-                self.batch.tweak_rows.push(value.into_boxed_slice());
-            };
             ControlFlow::Continue(())
         }
 
@@ -660,9 +585,10 @@ fn index_single_block(
 
     let mut index_block = IndexBlockVisitor {
         index,
+        daemon,
         batch,
         height,
-        initial_sync_done,
+        min_dust,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}
@@ -682,14 +608,11 @@ fn scan_single_block_for_silent_payments(
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         min_dust: u64,
-        value: &'a mut Vec<u8>,
-        tx_index: usize,
+        tweak_block_data: &'a mut TweakBlockData,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
         fn visit_transaction(&mut self, tx: &bsl::Transaction) -> core::ops::ControlFlow<()> {
-            info!("tx_index: {}", self.tx_index);
-            self.tx_index += 1;
             let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
                 Ok(parsed_tx) => parsed_tx,
                 Err(_) => return ControlFlow::Continue(()),
@@ -700,30 +623,26 @@ fn scan_single_block_for_silent_payments(
             };
 
             let txid = bsl_txid(tx);
-            info!("txid: {}", txid);
-
-            let output_pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
+            let output_pubkeys: Arc<Mutex<Vec<VoutData>>> =
+                Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
 
             let i = Mutex::new(0);
             parsed_tx.output.clone().into_par_iter().for_each(|o| {
                 let amount = o.value.to_sat();
                 if o.script_pubkey.is_p2tr() && amount >= self.min_dust {
-                    let is_unspent = self
+                    let unspent_response = self
                         .daemon
                         .get_tx_out(&txid, *i.lock().unwrap())
                         .ok()
                         .and_then(|result| result);
+                    let is_unspent = !unspent_response.is_none();
 
-                    if !is_unspent.is_none() {
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(i.lock().unwrap().to_be_bytes());
-                        output_pubkeys.lock().unwrap().extend(amount.to_be_bytes());
-                        output_pubkeys
-                            .lock()
-                            .unwrap()
-                            .extend(o.script_pubkey.to_bytes());
+                    if is_unspent {
+                        output_pubkeys.lock().unwrap().push(VoutData {
+                            vout: *i.lock().unwrap(),
+                            amount,
+                            script_pub_key: o.script_pubkey,
+                        });
                     }
                 }
                 *i.lock().unwrap() += 1;
@@ -740,29 +659,28 @@ fn scan_single_block_for_silent_payments(
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
 
-                let prev_tx: bitcoin::Transaction = self
-                    .daemon
-                    .get_transaction(&prev_txid, None)
-                    .expect("Spending non existent UTXO");
-                let index: usize = prev_vout.try_into().expect("Unexpectedly high vout");
-                let prevout: &bitcoin::TxOut = prev_tx
-                    .output
-                    .get(index)
-                    .expect("Spending a non existent UTXO");
-                match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
-                    script_sig: i.script_sig.to_bytes(),
-                    txinwitness: i.witness.to_vec(),
-                    script_pub_key: prevout.script_pubkey.to_bytes(),
-                }) {
-                    Ok(Some(pubkey)) => {
-                        outpoints
-                            .lock()
-                            .unwrap()
-                            .push((prev_txid.to_string(), prev_vout));
-                        pubkeys.lock().unwrap().push(pubkey)
+                let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
+                let prevout: Option<bitcoin::TxOut> = prev_tx.and_then(|prev_tx| {
+                    let index: Option<usize> = prev_vout.try_into().ok();
+                    index.and_then(move |index| prev_tx.output.get(index).cloned())
+                });
+
+                if let Some(prevout) = prevout {
+                    match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
+                        script_sig: i.script_sig.to_bytes(),
+                        txinwitness: i.witness.to_vec(),
+                        script_pub_key: prevout.script_pubkey.to_bytes(),
+                    }) {
+                        Ok(Some(pubkey)) => {
+                            outpoints
+                                .lock()
+                                .unwrap()
+                                .push((prev_txid.to_string(), prev_vout));
+                            pubkeys.lock().unwrap().push(pubkey)
+                        }
+                        Ok(None) => (),
+                        Err(_) => {}
                     }
-                    Ok(None) => (),
-                    Err(_) => {}
                 }
             });
 
@@ -773,16 +691,11 @@ fn scan_single_block_for_silent_payments(
                 if let Some(tweak) =
                     recipient_calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()).ok()
                 {
-                    let mut txid_value = [0u8; 32];
-                    txid_value.copy_from_slice(&txid[..]);
-                    txid_value.reverse();
-
-                    self.value.extend(txid_value);
-                    self.value.extend(&Vec::from_iter(tweak.serialize()));
-
-                    let outputs = output_pubkeys.lock().unwrap().clone();
-                    self.value.extend(outputs.len().to_be_bytes());
-                    self.value.extend(outputs);
+                    self.tweak_block_data.tx_data.push(TweakData {
+                        txid,
+                        tweak,
+                        vout_data: output_pubkeys.lock().unwrap().to_vec(),
+                    });
                 }
             }
 
@@ -790,20 +703,20 @@ fn scan_single_block_for_silent_payments(
         }
     }
 
-    let mut value = block_height.to_be_bytes().to_vec();
-    let tx_index = 0;
+    if let Some(height) = u64::try_from(block_height).ok() {
+        let mut tweak_block_data = TweakBlockData::new(height);
 
-    let mut index_block = IndexBlockVisitor {
-        daemon,
-        value: &mut value,
-        min_dust,
-        tx_index,
-    };
-    match bsl::Block::visit(&block, &mut index_block) {
-        Ok(_) => {}
-        Err(_) => {}
-    };
+        let mut index_block = IndexBlockVisitor {
+            daemon,
+            tweak_block_data: &mut tweak_block_data,
+            min_dust,
+        };
+        match bsl::Block::visit(&block, &mut index_block) {
+            Ok(_) => {}
+            Err(_) => {}
+        };
 
-    batch.tweak_rows.push(value.into_boxed_slice());
-    batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+        batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
+        batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+    }
 }

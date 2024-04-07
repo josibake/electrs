@@ -13,7 +13,6 @@ pub(crate) struct WriteBatch {
     pub(crate) header_rows: Vec<Row>,
     pub(crate) funding_rows: Vec<Row>,
     pub(crate) spending_rows: Vec<Row>,
-    pub(crate) outpoint_rows: Vec<Row>,
     pub(crate) txid_rows: Vec<Row>,
     pub(crate) tweak_rows: Vec<Row>,
 }
@@ -23,7 +22,6 @@ impl WriteBatch {
         self.header_rows.sort_unstable();
         self.funding_rows.sort_unstable();
         self.spending_rows.sort_unstable();
-        self.outpoint_rows.sort_unstable();
         self.txid_rows.sort_unstable();
         self.tweak_rows.sort_unstable();
     }
@@ -40,7 +38,6 @@ const HEADERS_CF: &str = "headers";
 const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
-const OUTPOINT_CF: &str = "outpoint";
 const TWEAK_CF: &str = "tweak";
 
 const COLUMN_FAMILIES: &[&str] = &[
@@ -49,7 +46,6 @@ const COLUMN_FAMILIES: &[&str] = &[
     TXID_CF,
     FUNDING_CF,
     SPENDING_CF,
-    OUTPOINT_CF,
     TWEAK_CF,
 ];
 
@@ -226,10 +222,6 @@ impl DBStore {
         self.db.cf_handle(SPENDING_CF).expect("missing SPENDING_CF")
     }
 
-    fn outpoint_cf(&self) -> &rocksdb::ColumnFamily {
-        self.db.cf_handle(OUTPOINT_CF).expect("missing OUTPOINT_CF")
-    }
-
     fn txid_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(TXID_CF).expect("missing TXID_CF")
     }
@@ -265,16 +257,6 @@ impl DBStore {
         self.db
             .iterator_cf_opt(cf, opts, mode)
             .map(|row| row.expect("prefix iterator failed").0) // values are empty in prefix-scanned CFs
-    }
-
-    pub(crate) fn read_outpoint_script(&self, prefix: Row) -> Vec<Row> {
-        let mode = rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward);
-        let mut opts = rocksdb::ReadOptions::default();
-        opts.set_prefix_same_as_start(true);
-        self.db
-            .iterator_cf_opt(self.outpoint_cf(), opts, mode)
-            .map(|row| row.expect("prefix iterator failed").1)
-            .collect()
     }
 
     pub(crate) fn read_headers(&self) -> Vec<Row> {
@@ -325,9 +307,6 @@ impl DBStore {
         for key in &batch.funding_rows {
             db_batch.put_cf(self.funding_cf(), key, b"");
         }
-        for key in &batch.outpoint_rows {
-            db_batch.put_cf(self.outpoint_cf(), &key[..12], &key[12..]);
-        }
         for key in &batch.spending_rows {
             db_batch.put_cf(self.spending_cf(), key, b"");
         }
@@ -343,8 +322,8 @@ impl DBStore {
 
         // Only for silent payments tweak sync
         for key in &batch.tweak_rows {
+            db_batch.delete_cf(self.tweak_cf(), &key[..8]);
             if key.len() > 8 {
-                db_batch.delete_cf(self.tweak_cf(), &key[..8]);
                 db_batch.put_cf(self.tweak_cf(), &key[..8], &key[8..]);
             }
         }
