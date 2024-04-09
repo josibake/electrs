@@ -312,7 +312,7 @@ impl Index {
                     }
 
                     map.insert(
-                        height.to_string(),
+                        tweak_block_data.block_height.to_string(),
                         serde_json::Value::Object(block_response_map),
                     );
 
