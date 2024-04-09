@@ -168,6 +168,13 @@ impl Daemon {
             .context("failed to broadcast transaction")
     }
 
+    pub(crate) fn get_block(&self, blockhash: String) -> Result<Value> {
+        // No need to parse the resulting JSON, just return it as-is to the client.
+        self.rpc
+            .call("getblock", &[json!(blockhash), json!(1)])
+            .context("failed to get block")
+    }
+
     pub(crate) fn get_transaction_info(
         &self,
         txid: &Txid,

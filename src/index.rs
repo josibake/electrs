@@ -481,14 +481,20 @@ fn index_single_block(
                     continue;
                 }
 
-                let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
-                let prev_block_height = prev_block_hash.and_then(|block_hash| {
-                    self.index
-                        .chain
-                        .get_block_height(&block_hash)
-                        .and_then(|height| {
-                            u64::try_from(height).ok().and_then(|height| Some(height))
-                        })
+                let prev_block_hash: Option<String> = self
+                    .daemon
+                    .get_transaction_info(&prev_txid, None)
+                    .ok()
+                    .and_then(|info| {
+                        info.get("blockhash")
+                            .and_then(|hash| hash.as_str())
+                            .map(|s| s.to_string())
+                    });
+                let prev_block_height = prev_block_hash.and_then(|hash| {
+                    self.daemon
+                        .get_block(hash)
+                        .ok()
+                        .and_then(|info| info.get("height").and_then(|height| height.as_u64()))
                 });
                 let prev_get_tweaks = prev_block_height
                     .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
