@@ -472,13 +472,13 @@ fn index_single_block(
                 });
 
                 if let None = prevout {
-                    return ControlFlow::Continue(());
+                    continue;
                 }
 
                 let prevout = prevout.unwrap();
 
                 if !prevout.script_pubkey.is_p2tr() || prevout.value.to_sat() < self.min_dust {
-                    return ControlFlow::Continue(());
+                    continue;
                 }
 
                 let prev_block_hash = self.index.filter_by_txid(prev_txid).next();
@@ -494,7 +494,7 @@ fn index_single_block(
                     .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
 
                 if prev_get_tweaks.is_none() {
-                    return ControlFlow::Continue(());
+                    continue;
                 }
 
                 let _: Vec<_> = prev_get_tweaks
