@@ -6,6 +6,7 @@ use bitcoin_slices::{bsl, Visit, Visitor};
 use rayon::prelude::*;
 use silentpayments::utils::receiving::recipient_calculate_tweak_data;
 use std::ops::ControlFlow;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::sp::{TweakBlockData, TweakData, VoutData};
@@ -383,11 +384,20 @@ impl Index {
         let mut batch = WriteBatch::default();
 
         if !sp {
+            let mut blocks_to_rescan = Vec::new();
+
             let scan_block = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block", || {
                         index_single_block(
-                            self, daemon, blockhash, block, height, &mut batch, min_dust,
+                            self,
+                            daemon,
+                            blockhash,
+                            block,
+                            height,
+                            &mut batch,
+                            min_dust,
+                            &mut blocks_to_rescan,
                         );
                     });
                     self.stats.height.set("tip", height as f64);
@@ -395,11 +405,23 @@ impl Index {
             };
 
             daemon.for_blocks(blockhashes, scan_block)?;
+
+            if !blocks_to_rescan.is_empty() {
+                let scan_block_for_sp = |blockhash, block| {
+                    if let Some(height) = self.chain.get_block_height(&blockhash) {
+                        scan_single_block_for_silent_payments(
+                            daemon, height, blockhash, block, &mut batch, min_dust, true,
+                        );
+                    };
+                };
+
+                daemon.for_blocks(blocks_to_rescan, scan_block_for_sp)?;
+            }
         } else {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     scan_single_block_for_silent_payments(
-                        daemon, height, blockhash, block, &mut batch, min_dust,
+                        daemon, height, blockhash, block, &mut batch, min_dust, false,
                     );
                 };
             };
@@ -432,6 +454,7 @@ fn index_single_block(
     height: usize,
     batch: &mut WriteBatch,
     min_dust: u64,
+    blocks_to_rescan: &mut Vec<BlockHash>,
 ) {
     struct IndexBlockVisitor<'a> {
         index: &'a Index,
@@ -439,6 +462,7 @@ fn index_single_block(
         batch: &'a mut WriteBatch,
         height: usize,
         min_dust: u64,
+        blocks_to_rescan: &'a mut Vec<BlockHash>,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -481,7 +505,7 @@ fn index_single_block(
                     continue;
                 }
 
-                let prev_block_hash: Option<String> = self
+                let prev_block_hash: Option<BlockHash> = self
                     .daemon
                     .get_transaction_info(&prev_txid, None)
                     .ok()
@@ -489,64 +513,14 @@ fn index_single_block(
                         info.get("blockhash")
                             .and_then(|hash| hash.as_str())
                             .map(|s| s.to_string())
+                            .and_then(|hash| BlockHash::from_str(&hash).ok())
                     });
-                let prev_block_height = prev_block_hash.and_then(|hash| {
-                    self.daemon
-                        .get_block(hash)
-                        .ok()
-                        .and_then(|info| info.get("height").and_then(|height| height.as_u64()))
-                });
-                let prev_get_tweaks = prev_block_height
-                    .and_then(|height| Some(self.index.store.read_tweaks(height, 1).into_iter()));
 
-                if prev_get_tweaks.is_none() {
-                    continue;
+                if let Some(hash) = prev_block_hash {
+                    if !self.blocks_to_rescan.contains(&hash) {
+                        self.blocks_to_rescan.push(hash);
+                    }
                 }
-
-                let _: Vec<_> = prev_get_tweaks
-                    .unwrap()
-                    .filter_map(|(key, data)| {
-                        if !data.is_empty() {
-                            let mut tweak_block_data =
-                                TweakBlockData::from_boxed_slice(key.clone(), data.clone());
-
-                            let mut update_entry = false;
-
-                            tweak_block_data.tx_data.retain(|tweak_data| {
-                                let mut new_vout_data = vec![];
-
-                                tweak_data.vout_data.iter().for_each(|vout| {
-                                    if vout.vout.to_string() == prev_vout.to_string()
-                                        && prevout.script_pubkey.to_hex_string()
-                                            == vout.script_pub_key.to_hex_string()
-                                    {
-                                        // Found an output being used in this tx as input, should
-                                        // update tweak db
-                                        update_entry = true;
-                                    } else {
-                                        new_vout_data.push(vout.clone().to_owned());
-                                    }
-                                });
-
-                                if new_vout_data.len() > 0 {
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-
-                            if update_entry {
-                                self.batch
-                                    .tweak_rows
-                                    .push(tweak_block_data.clone().into_boxed_slice());
-                            }
-
-                            Some(())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
             }
 
             ControlFlow::Continue(())
@@ -595,6 +569,7 @@ fn index_single_block(
         batch,
         height,
         min_dust,
+        blocks_to_rescan,
     };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}
@@ -610,7 +585,12 @@ fn scan_single_block_for_silent_payments(
     block: SerBlock,
     batch: &mut WriteBatch,
     min_dust: u64,
+    is_rescan: bool,
 ) {
+    if is_rescan {
+        info!("Rescanning for sp tweaks in block: {}", block_height);
+    }
+
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         min_dust: u64,
@@ -632,27 +612,30 @@ fn scan_single_block_for_silent_payments(
             let output_pubkeys: Arc<Mutex<Vec<VoutData>>> =
                 Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
 
-            let i = Mutex::new(0);
-            parsed_tx.output.clone().into_par_iter().for_each(|o| {
-                let amount = o.value.to_sat();
-                if o.script_pubkey.is_p2tr() && amount >= self.min_dust {
-                    let unspent_response = self
-                        .daemon
-                        .get_tx_out(&txid, *i.lock().unwrap())
-                        .ok()
-                        .and_then(|result| result);
-                    let is_unspent = !unspent_response.is_none();
+            parsed_tx
+                .output
+                .clone()
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(i, o)| {
+                    let amount = o.value.to_sat();
+                    if o.script_pubkey.is_p2tr() && amount >= self.min_dust {
+                        let unspent_response = self
+                            .daemon
+                            .get_tx_out(&txid, i.try_into().unwrap())
+                            .ok()
+                            .and_then(|result| result);
+                        let is_unspent = !unspent_response.is_none();
 
-                    if is_unspent {
-                        output_pubkeys.lock().unwrap().push(VoutData {
-                            vout: *i.lock().unwrap(),
-                            amount,
-                            script_pub_key: o.script_pubkey,
-                        });
+                        if is_unspent {
+                            output_pubkeys.lock().unwrap().push(VoutData {
+                                vout: i.try_into().unwrap(),
+                                amount,
+                                script_pub_key: o.script_pubkey,
+                            });
+                        }
                     }
-                }
-                *i.lock().unwrap() += 1;
-            });
+                });
 
             if output_pubkeys.lock().unwrap().is_empty() {
                 return ControlFlow::Continue(());
@@ -723,6 +706,8 @@ fn scan_single_block_for_silent_payments(
         };
 
         batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
-        batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+        if !is_rescan {
+            batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+        }
     }
 }
