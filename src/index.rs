@@ -291,17 +291,27 @@ impl Index {
                         if let Some(vout_map) = tx_response_map.get_mut("output_pubkeys") {
                             if let Some(vout_map) = vout_map.as_object_mut() {
                                 for vout in tweak_data.vout_data {
-                                    vout_map.insert(
-                                        vout.vout.to_string(),
-                                        serde_json::Value::Array(vec![
-                                            serde_json::Value::String(
-                                                vout.script_pub_key
-                                                    .to_hex_string()
-                                                    .replace("5120", ""),
-                                            ),
-                                            serde_json::Value::Number(vout.amount.into()),
-                                        ]),
-                                    );
+                                    if self
+                                        .store
+                                        .iter_spending(SpendingPrefixRow::scan_prefix(OutPoint {
+                                            txid: tweak_data.txid,
+                                            vout: vout.vout,
+                                        }))
+                                        .next()
+                                        .is_none()
+                                    {
+                                        vout_map.insert(
+                                            vout.vout.to_string(),
+                                            serde_json::Value::Array(vec![
+                                                serde_json::Value::String(
+                                                    vout.script_pub_key
+                                                        .to_hex_string()
+                                                        .replace("5120", ""),
+                                                ),
+                                                serde_json::Value::Number(vout.amount.into()),
+                                            ]),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -384,44 +394,21 @@ impl Index {
         let mut batch = WriteBatch::default();
 
         if !sp {
-            let mut blocks_to_rescan = Vec::new();
-
             let scan_block = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     self.stats.observe_duration("block", || {
-                        index_single_block(
-                            self,
-                            daemon,
-                            blockhash,
-                            block,
-                            height,
-                            &mut batch,
-                            min_dust,
-                            &mut blocks_to_rescan,
-                        );
+                        index_single_block(blockhash, block, height, &mut batch);
                     });
                     self.stats.height.set("tip", height as f64);
                 };
             };
 
             daemon.for_blocks(blockhashes, scan_block)?;
-
-            if !blocks_to_rescan.is_empty() {
-                let scan_block_for_sp = |blockhash, block| {
-                    if let Some(height) = self.chain.get_block_height(&blockhash) {
-                        scan_single_block_for_silent_payments(
-                            daemon, height, blockhash, block, &mut batch, min_dust, true,
-                        );
-                    };
-                };
-
-                daemon.for_blocks(blocks_to_rescan, scan_block_for_sp)?;
-            }
         } else {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     scan_single_block_for_silent_payments(
-                        daemon, height, blockhash, block, &mut batch, min_dust, false,
+                        daemon, height, blockhash, block, &mut batch, min_dust
                     );
                 };
             };
@@ -447,22 +434,14 @@ fn db_rows_size(rows: &[Row]) -> usize {
 }
 
 fn index_single_block(
-    index: &Index,
-    daemon: &Daemon,
     block_hash: BlockHash,
     block: SerBlock,
     height: usize,
     batch: &mut WriteBatch,
-    min_dust: u64,
-    blocks_to_rescan: &mut Vec<BlockHash>,
 ) {
     struct IndexBlockVisitor<'a> {
-        index: &'a Index,
-        daemon: &'a Daemon,
         batch: &'a mut WriteBatch,
         height: usize,
-        min_dust: u64,
-        blocks_to_rescan: &'a mut Vec<BlockHash>,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
@@ -471,61 +450,6 @@ fn index_single_block(
             self.batch
                 .txid_rows
                 .push(TxidRow::row(txid, self.height).to_db_row());
-
-            if !self.index.initial_sync_done {
-                return ControlFlow::Continue(());
-            }
-
-            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
-                Ok(parsed_tx) => parsed_tx,
-                Err(_) => return ControlFlow::Continue(()),
-            };
-
-            if parsed_tx.is_coinbase() {
-                return ControlFlow::Continue(());
-            };
-
-            for i in parsed_tx.input.iter() {
-                let prev_txid = i.previous_output.txid;
-                let prev_vout = i.previous_output.vout;
-
-                if !i.script_sig.is_empty() || i.witness.len() != 1 {
-                    continue;
-                }
-
-                let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
-                let prevout: Option<bitcoin::TxOut> = prev_tx.and_then(|prev_tx| {
-                    let index: Option<usize> = prev_vout.try_into().ok();
-                    index.and_then(move |index| prev_tx.output.get(index).cloned())
-                });
-
-                if let None = prevout {
-                    continue;
-                }
-
-                let prevout = prevout.unwrap();
-
-                if !prevout.script_pubkey.is_p2tr() || prevout.value.to_sat() < self.min_dust {
-                    continue;
-                }
-
-                let prev_block_hash: Option<BlockHash> = self
-                    .daemon
-                    .get_transaction_info(&prev_txid, None)
-                    .ok()
-                    .and_then(|info| {
-                        info.get("blockhash")
-                            .and_then(|hash| hash.as_str())
-                            .map(|s| s.to_string())
-                            .and_then(|hash| BlockHash::from_str(&hash).ok())
-                    });
-
-                if let Some(hash) = prev_block_hash {
-                    if !self.blocks_to_rescan.contains(&hash) {
-                        self.blocks_to_rescan.push(hash);
-                    }
-                }
-            }
 
             ControlFlow::Continue(())
         }
@@ -567,14 +491,7 @@ fn index_single_block(
         }
     }
 
-    let mut index_block = IndexBlockVisitor {
-        index,
-        daemon,
-        batch,
-        height,
-        min_dust,
-        blocks_to_rescan,
-    };
+    let mut index_block = IndexBlockVisitor { batch, height };
     match bsl::Block::visit(&block, &mut index_block) {
         Ok(_) => {}
         Err(_) => {}
@@ -589,12 +506,7 @@ fn scan_single_block_for_silent_payments(
     block: SerBlock,
     batch: &mut WriteBatch,
     min_dust: u64,
-    is_rescan: bool,
 ) {
-    if is_rescan {
-        info!("Rescanning for sp tweaks in block: {}", block_height);
-    }
-
     struct IndexBlockVisitor<'a> {
         daemon: &'a Daemon,
         min_dust: u64,
@@ -710,8 +622,6 @@ fn scan_single_block_for_silent_payments(
         };
 
         batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
-        if !is_rescan {
-            batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
-        }
+        batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
     }
 }
