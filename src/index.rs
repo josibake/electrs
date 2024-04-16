@@ -489,6 +489,10 @@ fn index_single_block(
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
 
+                if !i.script_sig.is_empty() || i.witness.len() != 1 {
+                    continue;
+                }
+
                 let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
                 let prevout: Option<bitcoin::TxOut> = prev_tx.and_then(|prev_tx| {
                     let index: Option<usize> = prev_vout.try_into().ok();
