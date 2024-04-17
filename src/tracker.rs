@@ -139,7 +139,7 @@ impl Tracker {
         Ok(result)
     }
 
-    pub(crate) fn get_tweaks(&self, height: usize) -> serde_json::Value {
-        self.index.get_tweaks(height)
+    pub(crate) fn get_tweaks(&self, daemon: &Daemon, height: usize) -> serde_json::Value {
+        self.index.get_tweaks(daemon, height)
     }
 }

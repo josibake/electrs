@@ -262,7 +262,7 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    pub(crate) fn get_tweaks(&self, height: usize) -> serde_json::Value {
+    pub(crate) fn get_tweaks(&self, daemon: &Daemon, height: usize) -> serde_json::Value {
         let mut map = serde_json::Map::new();
 
         let _: Vec<_> = self
@@ -290,15 +290,13 @@ impl Index {
                         if let Some(vout_map) = tx_response_map.get_mut("output_pubkeys") {
                             if let Some(vout_map) = vout_map.as_object_mut() {
                                 for vout in tweak_data.vout_data {
-                                    if self
-                                        .store
-                                        .iter_spending(SpendingPrefixRow::scan_prefix(OutPoint {
-                                            txid: tweak_data.txid,
-                                            vout: vout.vout,
-                                        }))
-                                        .next()
-                                        .is_none()
-                                    {
+                                    let unspent_response = daemon
+                                        .get_tx_out(&tweak_data.txid, vout.vout)
+                                        .ok()
+                                        .and_then(|result| result);
+                                    let is_unspent = !unspent_response.is_none();
+
+                                    if is_unspent {
                                         vout_map.insert(
                                             vout.vout.to_string(),
                                             serde_json::Value::Array(vec![
@@ -407,7 +405,7 @@ impl Index {
             let scan_block_for_sp = |blockhash, block| {
                 if let Some(height) = heights.next() {
                     scan_single_block_for_silent_payments(
-                        daemon, height, blockhash, block, &mut batch, min_dust
+                        daemon, height, blockhash, block, &mut batch, min_dust,
                     );
                 };
             };

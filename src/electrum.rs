@@ -215,28 +215,30 @@ impl Rpc {
         Ok(notifications.into_iter().map(|v| v.to_string()).collect())
     }
 
-    pub fn tweaks_subscribe(&self, peer: &mut Peer, (height,): (usize,)) -> Result<Value> {
+    pub fn tweaks_subscribe(&self, peer: &mut Peer, (height, count): (usize,usize)) -> Result<Value> {
         let current_height = self.tracker.chain().height();
 
-        for h in height..=current_height {
-            let value = self.tracker.get_tweaks(h);
+        for h in height..=height+count {
+            let value = self.tracker.get_tweaks(&self.daemon, h);
             let tweaks = value.as_object();
             if let Some(tweaks) = tweaks {
-                let result = if tweaks.is_empty() {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert(h.to_string(), json!({}));
-                    obj
-                } else {
-                    tweaks.to_owned()
-                };
+                if tweaks.is_empty() {
+                    continue;
+                }
+
                 let _ = peer.send(vec![notification(
                     "blockchain.tweaks.subscribe",
-                    &[json!(result)],
+                    &[json!(tweaks)],
                 )
                 .to_string()]);
             }
         }
 
+        let _ = peer.send(vec![notification(
+            "blockchain.tweaks.subscribe",
+            &[json!({"message": "done"})],
+        )
+        .to_string()]);
         Ok(json!(current_height))
     }
 
@@ -622,7 +624,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
-    TweaksSubscribe((usize,)),
+    TweaksSubscribe((usize,usize)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),
