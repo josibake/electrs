@@ -20,6 +20,7 @@ use crate::{
     daemon::{self, extract_bitcoind_error, Daemon},
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
+    server::Peer,
     signals::Signal,
     status::ScriptHashStatus,
     tracker::Tracker,
@@ -214,6 +215,31 @@ impl Rpc {
         Ok(notifications.into_iter().map(|v| v.to_string()).collect())
     }
 
+    pub fn tweaks_subscribe(&self, peer: &mut Peer, (height,): (usize,)) -> Result<Value> {
+        let current_height = self.tracker.chain().height();
+
+        for h in height..=current_height {
+            let value = self.tracker.get_tweaks(h);
+            let tweaks = value.as_object();
+            if let Some(tweaks) = tweaks {
+                let result = if tweaks.is_empty() {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert(h.to_string(), json!({}));
+                    obj
+                } else {
+                    tweaks.to_owned()
+                };
+                let _ = peer.send(vec![notification(
+                    "blockchain.tweaks.subscribe",
+                    &[json!(result)],
+                )
+                .to_string()]);
+            }
+        }
+
+        Ok(json!(current_height))
+    }
+
     fn headers_subscribe(&self, client: &mut Client) -> Result<Value> {
         let chain = self.tracker.chain();
         client.tip = Some(chain.tip());
@@ -401,11 +427,6 @@ impl Rpc {
         Ok(json!(self.daemon.get_transaction_hex(&txid, None)?))
     }
 
-    fn sp_tweaks_get(&self, (start_height, count): (usize, Option<usize>)) -> Result<Value> {
-        let count = count.unwrap_or(1);
-        Ok(json!(self.tracker.get_tweaks(start_height, count)?))
-    }
-
     fn transaction_get_merkle(&self, (txid, height): &(Txid, usize)) -> Result<Value> {
         let chain = self.tracker.chain();
         let blockhash = match chain.get_block_hash(*height) {
@@ -477,7 +498,7 @@ impl Rpc {
         }))
     }
 
-    pub fn handle_requests(&self, client: &mut Client, lines: &[String]) -> Vec<String> {
+    pub fn handle_requests(&self, peer: &mut Peer, lines: &[String]) -> Vec<String> {
         lines
             .iter()
             .map(|line| {
@@ -485,11 +506,11 @@ impl Rpc {
                     .map(Calls::parse)
                     .map_err(error_msg_no_id)
             })
-            .map(|calls| self.handle_calls(client, calls).to_string())
+            .map(|calls| self.handle_calls(peer, calls).to_string())
             .collect()
     }
 
-    fn handle_calls(&self, client: &mut Client, calls: Result<Calls, Value>) -> Value {
+    fn handle_calls(&self, peer: &mut Peer, calls: Result<Calls, Value>) -> Value {
         let calls: Calls = match calls {
             Ok(calls) => calls,
             Err(response) => return response, // JSON parsing failed - the response does not contain request id
@@ -497,23 +518,19 @@ impl Rpc {
 
         match calls {
             Calls::Batch(batch) => {
-                if let Some(result) = self.try_multi_call(client, &batch) {
+                if let Some(result) = self.try_multi_call(peer, &batch) {
                     return json!(result);
                 }
                 json!(batch
                     .into_iter()
-                    .map(|result| self.single_call(client, result))
+                    .map(|result| self.single_call(peer, result))
                     .collect::<Vec<Value>>())
             }
-            Calls::Single(result) => self.single_call(client, result),
+            Calls::Single(result) => self.single_call(peer, result),
         }
     }
 
-    fn try_multi_call(
-        &self,
-        client: &mut Client,
-        calls: &[Result<Call, Value>],
-    ) -> Option<Vec<Value>> {
+    fn try_multi_call(&self, peer: &mut Peer, calls: &[Result<Call, Value>]) -> Option<Vec<Value>> {
         // exit if any call failed to parse
         let valid_calls = calls
             .iter()
@@ -532,7 +549,7 @@ impl Rpc {
         Some(
             self.rpc_duration
                 .observe_duration("blockchain.scripthash.subscribe:multi", || {
-                    self.scripthashes_subscribe(client, &scripthashes)
+                    self.scripthashes_subscribe(&mut peer.client, &scripthashes)
                         .zip(valid_calls)
                         .map(|(result, call)| call.response(result))
                         .collect::<Vec<Value>>()
@@ -540,7 +557,7 @@ impl Rpc {
         )
     }
 
-    fn single_call(&self, client: &mut Client, call: Result<Call, Value>) -> Value {
+    fn single_call(&self, peer: &mut Peer, call: Result<Call, Value>) -> Value {
         let call = match call {
             Ok(call) => call,
             Err(response) => return response, // params parsing may fail - the response contains request id
@@ -560,20 +577,30 @@ impl Rpc {
                 Params::Banner => Ok(json!(self.banner)),
                 Params::BlockHeader(args) => self.block_header(*args),
                 Params::BlockHeaders(args) => self.block_headers(*args),
-                Params::SpTweaks(args) => self.sp_tweaks_get(*args),
+                Params::TweaksSubscribe(args) => self.tweaks_subscribe(peer, *args),
                 Params::Donation => Ok(Value::Null),
                 Params::EstimateFee(args) => self.estimate_fee(*args),
                 Params::Features => self.features(),
-                Params::HeadersSubscribe => self.headers_subscribe(client),
+                Params::HeadersSubscribe => self.headers_subscribe(&mut peer.client),
                 Params::MempoolFeeHistogram => self.get_fee_histogram(),
                 Params::PeersSubscribe => Ok(json!([])),
                 Params::Ping => Ok(Value::Null),
                 Params::RelayFee => self.relayfee(),
-                Params::ScriptHashGetBalance(args) => self.scripthash_get_balance(client, args),
-                Params::ScriptHashGetHistory(args) => self.scripthash_get_history(client, args),
-                Params::ScriptHashListUnspent(args) => self.scripthash_list_unspent(client, args),
-                Params::ScriptHashSubscribe(args) => self.scripthash_subscribe(client, args),
-                Params::ScriptHashUnsubscribe(args) => self.scripthash_unsubscribe(client, args),
+                Params::ScriptHashGetBalance(args) => {
+                    self.scripthash_get_balance(&mut peer.client, args)
+                }
+                Params::ScriptHashGetHistory(args) => {
+                    self.scripthash_get_history(&mut peer.client, args)
+                }
+                Params::ScriptHashListUnspent(args) => {
+                    self.scripthash_list_unspent(&mut peer.client, args)
+                }
+                Params::ScriptHashSubscribe(args) => {
+                    self.scripthash_subscribe(&mut peer.client, args)
+                }
+                Params::ScriptHashUnsubscribe(args) => {
+                    self.scripthash_unsubscribe(&mut peer.client, args)
+                }
                 Params::TransactionBroadcast(args) => self.transaction_broadcast(args),
                 Params::TransactionGet(args) => self.transaction_get(args),
                 Params::TransactionGetMerkle(args) => self.transaction_get_merkle(args),
@@ -590,7 +617,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
-    SpTweaks((usize, Option<usize>)),
+    TweaksSubscribe((usize,)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),
@@ -616,7 +643,7 @@ impl Params {
         Ok(match method {
             "blockchain.block.header" => Params::BlockHeader(convert(params)?),
             "blockchain.block.headers" => Params::BlockHeaders(convert(params)?),
-            "blockchain.block.tweaks" => Params::SpTweaks(convert(params)?),
+            "blockchain.tweaks.subscribe" => Params::TweaksSubscribe(convert(params)?),
             "blockchain.estimatefee" => Params::EstimateFee(convert(params)?),
             "blockchain.headers.subscribe" => Params::HeadersSubscribe,
             "blockchain.relayfee" => Params::RelayFee,
@@ -646,7 +673,7 @@ impl Params {
     }
 }
 
-struct Call {
+pub struct Call {
     id: Value,
     method: String,
     params: Params,

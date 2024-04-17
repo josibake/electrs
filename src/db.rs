@@ -291,11 +291,11 @@ impl DBStore {
             .collect()
     }
 
-    pub(crate) fn read_tweaks(&self, height: u64, count: u64) -> Vec<(Row, Row)> {
+    pub(crate) fn read_tweaks(&self, height: u64) -> Vec<(Row, Row)> {
         let mut opts = rocksdb::ReadOptions::default();
         opts.fill_cache(false);
         opts.set_iterate_lower_bound(u64::to_be_bytes(height));
-        opts.set_iterate_upper_bound(u64::to_be_bytes(height + count));
+        opts.set_iterate_upper_bound(u64::to_be_bytes(height + 1));
         self.db
             .iterator_cf_opt(self.tweak_cf(), opts, rocksdb::IteratorMode::Start)
             .map(|row| row.expect("tweak iterator failed"))

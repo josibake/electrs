@@ -17,9 +17,9 @@ use crate::{
     thread::spawn,
 };
 
-struct Peer {
+pub struct Peer {
     id: usize,
-    client: Client,
+    pub client: Client,
     stream: TcpStream,
 }
 
@@ -29,7 +29,7 @@ impl Peer {
         Self { id, client, stream }
     }
 
-    fn send(&mut self, values: Vec<String>) -> Result<()> {
+    pub fn send(&mut self, values: Vec<String>) -> Result<()> {
         for mut value in values {
             debug!("{}: send {}", self.id, value);
             value += "\n";
@@ -196,7 +196,7 @@ fn handle_peer_events(
     }
     let result = match peers.get_mut(&peer_id) {
         Some(peer) => {
-            let responses = rpc.handle_requests(&mut peer.client, &lines);
+            let responses = rpc.handle_requests(peer, &lines);
             peer.send(responses)
         }
         None => return, // unknown peer

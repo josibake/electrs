@@ -6,7 +6,6 @@ use bitcoin_slices::{bsl, Visit, Visitor};
 use rayon::prelude::*;
 use silentpayments::utils::receiving::recipient_calculate_tweak_data;
 use std::ops::ControlFlow;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::sp::{TweakBlockData, TweakData, VoutData};
@@ -263,12 +262,12 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    pub(crate) fn get_tweaks(&self, height: usize, count: usize) -> serde_json::Value {
+    pub(crate) fn get_tweaks(&self, height: usize) -> serde_json::Value {
         let mut map = serde_json::Map::new();
 
         let _: Vec<_> = self
             .store
-            .read_tweaks(height as u64, count as u64)
+            .read_tweaks(height as u64)
             .into_iter()
             .filter_map(|(key, data)| {
                 if !data.is_empty() {
