@@ -240,11 +240,16 @@ impl Rpc {
         Ok(json!(current_height))
     }
 
-    fn headers_subscribe(&self, client: &mut Client) -> Result<Value> {
+    fn headers_subscribe(&self, peer: &mut Peer) -> Result<Value> {
         let chain = self.tracker.chain();
-        client.tip = Some(chain.tip());
+        peer.client.tip = Some(chain.tip());
         let height = chain.height();
         let header = chain.get_block_header(height).unwrap();
+        let _ = peer.send(vec![notification(
+            "blockchain.headers.subscribe",
+            &[json!({"hex": serialize_hex(header), "height": height})],
+        )
+        .to_string()]);
         Ok(json!({"hex": serialize_hex(header), "height": height}))
     }
 
@@ -581,7 +586,7 @@ impl Rpc {
                 Params::Donation => Ok(Value::Null),
                 Params::EstimateFee(args) => self.estimate_fee(*args),
                 Params::Features => self.features(),
-                Params::HeadersSubscribe => self.headers_subscribe(&mut peer.client),
+                Params::HeadersSubscribe => self.headers_subscribe(peer),
                 Params::MempoolFeeHistogram => self.get_fee_histogram(),
                 Params::PeersSubscribe => Ok(json!([])),
                 Params::Ping => Ok(Value::Null),
