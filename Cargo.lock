@@ -1014,7 +1014,8 @@ dependencies = [
 [[package]]
 name = "silentpayments"
 version = "0.1.1"
-source = "git+https://github.com/cake-tech/rust-silentpayments?branch=master#28ba3a6b1df127926f411ed63fabc71c41539bc6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f3a0169e01dc753fe00f82d0b08a68d49e69f912f592e95ff5ade8b623728a5"
 dependencies = [
  "bech32 0.9.1",
  "bimap",

@@ -4,7 +4,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
 use rayon::prelude::*;
-use silentpayments::utils::receiving::recipient_calculate_tweak_data;
+use silentpayments::utils::receiving::calculate_tweak_data;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
@@ -591,7 +591,7 @@ fn scan_single_block_for_silent_payments(
 
             if !pubkeys_ref.is_empty() {
                 if let Some(tweak) =
-                    recipient_calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()).ok()
+                    calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()).ok()
                 {
                     self.tweak_block_data.tx_data.push(TweakData {
                         txid,
