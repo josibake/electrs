@@ -4,7 +4,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
 use rayon::prelude::*;
-use silentpayments::utils::receiving::calculate_tweak_data;
+use silentpayments::utils::receiving::{calculate_tweak_data, get_pubkey_from_input};
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
@@ -568,11 +568,11 @@ fn scan_single_block_for_silent_payments(
                 });
 
                 if let Some(prevout) = prevout {
-                    match crate::sp::get_pubkey_from_input(&crate::sp::VinData {
-                        script_sig: i.script_sig.to_bytes(),
-                        txinwitness: i.witness.to_vec(),
-                        script_pub_key: prevout.script_pubkey.to_bytes(),
-                    }) {
+                    match get_pubkey_from_input(
+                        i.script_sig.as_bytes(),
+                        &i.witness.to_vec(),
+                        prevout.script_pubkey.as_bytes(),
+                    ) {
                         Ok(Some(pubkey)) => {
                             outpoints
                                 .lock()
