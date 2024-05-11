@@ -259,11 +259,6 @@ impl Rpc {
         peer.client.tip = Some(chain.tip());
         let height = chain.height();
         let header = chain.get_block_header(height).unwrap();
-        let _ = peer.send(vec![notification(
-            "blockchain.headers.subscribe",
-            &[json!({"hex": serialize_hex(header), "height": height})],
-        )
-        .to_string()]);
         Ok(json!({"hex": serialize_hex(header), "height": height}))
     }
 
