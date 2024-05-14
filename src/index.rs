@@ -184,7 +184,7 @@ impl Index {
         sp_min_dust: Option<usize>,
         sp_skip_height: Option<usize>,
     ) -> Result<bool> {
-        let start: usize;
+        let mut start = 0;
         let initial_height = sp_begin_height.unwrap_or(70_000);
 
         if let Some(sp_skip_height) = sp_skip_height {
@@ -192,41 +192,41 @@ impl Index {
         } else {
             if let Some(row) = self.store.last_sp() {
                 let blockhash = deserialize::<BlockHash>(&row).ok().and_then(|blockhash| {
-                    Some(
-                        self.chain
-                            .get_block_height(&blockhash)
-                            .unwrap_or(initial_height - 1)
-                            + 1,
-                    )
+                    let height = self.chain.get_block_height(&blockhash).unwrap_or(0);
+
+                    if height > 0 {
+                        Some(height + 1)
+                    } else {
+                        Some(0)
+                    }
                 });
 
                 if let Some(blockhash) = blockhash {
-                    start = blockhash;
-                } else {
+                    if blockhash > 0 {
+                        start = blockhash;
+                    }
+                }
+
+                if start == 0 {
                     start = self
                         .store
                         .read_last_tweak()
                         .into_iter()
-                        .filter_map(|(blockhash, _)| {
-                            Some(
-                                deserialize::<BlockHash>(&blockhash)
-                                    .ok()
-                                    .and_then(|blockhash| {
-                                        Some(
-                                            self.chain
-                                                .get_block_height(&blockhash)
-                                                .unwrap_or(initial_height - 1)
-                                                + 1,
-                                        )
-                                    })
-                                    .unwrap_or(initial_height),
-                            )
+                        .filter_map(|(key, data)| {
+                            let tweak_block_data =
+                                TweakBlockData::from_boxed_slice(key.clone(), data.clone());
+
+                            Some(tweak_block_data.block_height as usize)
                         })
                         .collect::<Vec<_>>()[0];
                 }
             } else {
                 start = initial_height;
             }
+        }
+
+        if start == initial_height {
+            panic!("start height is the same as initial height");
         }
 
         let new_header = self
@@ -262,7 +262,12 @@ impl Index {
         Ok(false) // sync is not done
     }
 
-    pub(crate) fn get_tweaks(&self, daemon: &Daemon, height: usize) -> serde_json::Value {
+    pub(crate) fn get_tweaks(
+        &self,
+        daemon: &Daemon,
+        height: usize,
+        historical: bool,
+    ) -> serde_json::Value {
         let mut map = serde_json::Map::new();
 
         let _: Vec<_> = self
@@ -290,13 +295,17 @@ impl Index {
                         if let Some(vout_map) = tx_response_map.get_mut("output_pubkeys") {
                             if let Some(vout_map) = vout_map.as_object_mut() {
                                 for vout in tweak_data.vout_data {
-                                    let unspent_response = daemon
-                                        .get_tx_out(&tweak_data.txid, vout.vout)
-                                        .ok()
-                                        .and_then(|result| result);
-                                    let is_unspent = !unspent_response.is_none();
+                                    let mut is_unspent = false;
 
-                                    if is_unspent {
+                                    if !historical {
+                                        let unspent_response = daemon
+                                            .get_tx_out(&tweak_data.txid, vout.vout)
+                                            .ok()
+                                            .and_then(|result| result);
+                                        is_unspent = !unspent_response.is_none();
+                                    }
+
+                                    if historical || is_unspent {
                                         vout_map.insert(
                                             vout.vout.to_string(),
                                             serde_json::Value::Array(vec![

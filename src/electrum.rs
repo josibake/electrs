@@ -218,12 +218,14 @@ impl Rpc {
     pub fn tweaks_subscribe(
         &self,
         peer: &mut Peer,
-        (height, count): (usize, usize),
+        (height, count, historical): (usize, usize, Option<bool>),
     ) -> Result<Value> {
         let current_height = self.tracker.chain().height();
 
         for h in height..=height + count {
-            let value = self.tracker.get_tweaks(&self.daemon, h);
+            let value = self
+                .tracker
+                .get_tweaks(&self.daemon, h, historical.unwrap_or(false));
             let tweaks = value.as_object();
             if let Some(tweaks) = tweaks {
                 if tweaks.is_empty() {
@@ -631,7 +633,7 @@ enum Params {
     Banner,
     BlockHeader((usize,)),
     BlockHeaders((usize, usize)),
-    TweaksSubscribe((usize, usize)),
+    TweaksSubscribe((usize, usize, Option<bool>)),
     TransactionBroadcast((String,)),
     Donation,
     EstimateFee((u16,)),
