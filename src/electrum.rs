@@ -221,8 +221,13 @@ impl Rpc {
         (height, count, historical): (usize, usize, Option<bool>),
     ) -> Result<Value> {
         let current_height = self.tracker.chain().height();
+        let scan_height = if height < self.sp_begin_height.unwrap_or(0) {
+            self.sp_begin_height.unwrap_or(0)
+        } else {
+            height
+        };
 
-        for h in height..=height + count {
+        for h in scan_height..=scan_height + count {
             let value = self
                 .tracker
                 .get_tweaks(&self.daemon, h, historical.unwrap_or(false));
