@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) type Row = Box<[u8]>;
 
 #[derive(Default)]
-pub(crate) struct WriteBatch {
+pub struct WriteBatch {
     pub(crate) tip_row: Row,
     pub(crate) sp_tip_row: Row,
     pub(crate) header_rows: Vec<Row>,
@@ -302,7 +302,7 @@ impl DBStore {
             .collect()
     }
 
-    pub(crate) fn write(&self, batch: &WriteBatch) {
+    pub fn write(&self, batch: &WriteBatch) {
         let mut db_batch = rocksdb::WriteBatch::default();
         for key in &batch.funding_rows {
             db_batch.put_cf(self.funding_cf(), key, b"");

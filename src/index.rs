@@ -3,6 +3,7 @@ use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
+use libbitcoinkernel_sys::BlockUndo;
 use rayon::prelude::*;
 use silentpayments::utils::receiving::{calculate_tweak_data, get_pubkey_from_input};
 use std::ops::ControlFlow;
@@ -223,10 +224,6 @@ impl Index {
             } else {
                 start = initial_height;
             }
-        }
-
-        if start == initial_height {
-            panic!("start height is the same as initial height");
         }
 
         let new_header = self
@@ -643,4 +640,123 @@ fn scan_single_block_for_silent_payments(
         batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
         batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
     }
+}
+
+pub fn scan_single_block_for_silent_payments_without_daemon(
+    block_height: usize,
+    block: SerBlock,
+    undo: BlockUndo,
+    batch: &mut WriteBatch,
+    min_dust: u64,
+) {
+    struct IndexBlockVisitor<'a> {
+        min_dust: u64,
+        tweak_block_data: &'a mut TweakBlockData,
+        tx_num: u64,
+        undo_block_data: BlockUndo,
+    }
+
+    impl<'a> Visitor for IndexBlockVisitor<'a> {
+        fn visit_transaction(&mut self, tx: &bsl::Transaction) -> core::ops::ControlFlow<()> {
+            let parsed_tx = match deserialize::<bitcoin::Transaction>(tx.as_ref()) {
+                Ok(parsed_tx) => parsed_tx,
+                Err(_) => return ControlFlow::Continue(()),
+            };
+
+            if parsed_tx.is_coinbase() {
+                assert_eq!(self.tx_num, 0);
+                self.tx_num += 1;
+                return ControlFlow::Continue(());
+            };
+
+            let txid = bsl_txid(tx);
+            let output_pubkeys: Arc<Mutex<Vec<VoutData>>> =
+                Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.output.len())));
+
+            parsed_tx
+                .output
+                .clone()
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(i, o)| {
+                    let amount = o.value.to_sat();
+                    if o.script_pubkey.is_p2tr() && amount >= self.min_dust {
+                        output_pubkeys.lock().unwrap().push(VoutData {
+                            vout: i.try_into().unwrap(),
+                            amount,
+                            script_pub_key: o.script_pubkey,
+                        });
+                    }
+                });
+
+            if output_pubkeys.lock().unwrap().is_empty() {
+                self.tx_num += 1;
+                return ControlFlow::Continue(());
+            }
+
+            let pubkeys = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
+            let outpoints = Arc::new(Mutex::new(Vec::with_capacity(parsed_tx.input.len())));
+
+            parsed_tx
+                .input
+                .clone()
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(vin, input)| {
+                    let prev_txid = input.previous_output.txid;
+                    let prev_vout = input.previous_output.vout;
+                    outpoints
+                        .lock()
+                        .unwrap()
+                        .push((prev_txid.to_string(), prev_vout));
+                    let undo_prevout = self
+                        .undo_block_data
+                        .get_prevout_by_index(self.tx_num - 1, vin as u64)
+                        .unwrap();
+                    match get_pubkey_from_input(
+                        input.script_sig.as_bytes(),
+                        &input.witness.to_vec(),
+                        &undo_prevout.script_pubkey,
+                    ) {
+                        Ok(Some(pubkey)) => pubkeys.lock().unwrap().push(pubkey),
+                        Ok(None) => (),
+                        Err(_) => {}
+                    }
+                });
+
+            let binding = pubkeys.lock().unwrap();
+            let pubkeys_ref: Vec<&PublicKey> = binding.iter().collect();
+
+            if !pubkeys_ref.is_empty() {
+                let tweak = match calculate_tweak_data(&pubkeys_ref, &outpoints.lock().unwrap()) {
+                    Ok(tweak) => tweak,
+                    Err(_) => {
+                        self.tx_num += 1;
+                        return ControlFlow::Continue(());
+                    }
+                };
+                self.tweak_block_data.tx_data.push(TweakData {
+                    txid,
+                    tweak,
+                    vout_data: output_pubkeys.lock().unwrap().to_vec(),
+                });
+            }
+            self.tx_num += 1;
+            ControlFlow::Continue(())
+        }
+    }
+
+    let height = u64::try_from(block_height).ok();
+    let mut tweak_block_data = TweakBlockData::new(height.unwrap());
+
+    let mut index_block = IndexBlockVisitor {
+        tweak_block_data: &mut tweak_block_data,
+        min_dust,
+        tx_num: 0,
+        undo_block_data: undo,
+    };
+    let block = bsl::Block::visit(&block, &mut index_block).unwrap();
+    let block_hash = block.parsed().block_hash();
+    batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
+    batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
 }

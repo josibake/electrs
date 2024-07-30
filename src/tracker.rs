@@ -78,9 +78,10 @@ impl Tracker {
         sp_begin_height: Option<usize>,
         sp_min_dust: Option<usize>,
         sp_skip_height: Option<usize>,
+        sp_index: bool,
     ) -> Result<bool> {
         let mut done = self.index.sync(daemon, exit_flag, sp_min_dust)?;
-        if done {
+        if done && sp_index {
             done = self.index.silent_payments_sync(
                 daemon,
                 exit_flag,
