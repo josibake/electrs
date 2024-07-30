@@ -149,6 +149,7 @@ pub struct Config {
     pub sp_begin_height: Option<usize>,
     pub sp_min_dust: Option<usize>,
     pub sp_skip_height: Option<usize>,
+    pub sp_index: bool,
     pub args: Vec<String>,
 }
 
@@ -360,6 +361,7 @@ impl Config {
             sp_begin_height: config.sp_begin_height,
             sp_min_dust: config.sp_min_dust,
             sp_skip_height: config.sp_skip_height,
+            sp_index: config.sp_index,
             args: args.map(|a| a.into_string().unwrap()).collect(),
         };
         eprintln!(

@@ -131,6 +131,7 @@ pub struct Rpc {
     sp_begin_height: Option<usize>,
     sp_min_dust: Option<usize>,
     sp_skip_height: Option<usize>,
+    sp_index: bool,
 }
 
 impl Rpc {
@@ -158,6 +159,7 @@ impl Rpc {
             sp_begin_height: config.sp_begin_height,
             sp_min_dust: config.sp_min_dust,
             sp_skip_height: config.sp_skip_height,
+            sp_index: config.sp_index,
         })
     }
 
@@ -176,6 +178,7 @@ impl Rpc {
             self.sp_begin_height,
             self.sp_min_dust,
             self.sp_skip_height,
+            self.sp_index,
         )
     }
 
