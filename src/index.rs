@@ -267,6 +267,7 @@ impl Index {
         daemon: &Daemon,
         height: usize,
         historical: bool,
+        min_dust: u64,
     ) -> serde_json::Value {
         let mut map = serde_json::Map::new();
 
@@ -292,9 +293,13 @@ impl Index {
                             serde_json::Value::Object(serde_json::Map::new()),
                         );
 
+                        let mut at_least_one_unspent = false;
                         if let Some(vout_map) = tx_response_map.get_mut("output_pubkeys") {
                             if let Some(vout_map) = vout_map.as_object_mut() {
                                 for vout in tweak_data.vout_data {
+                                    if vout.amount <= min_dust {
+                                        continue;
+                                    }
                                     let mut is_unspent = false;
 
                                     if !historical {
@@ -306,6 +311,7 @@ impl Index {
                                     }
 
                                     if historical || is_unspent {
+                                        at_least_one_unspent = true;
                                         vout_map.insert(
                                             vout.vout.to_string(),
                                             serde_json::Value::Array(vec![
@@ -322,18 +328,25 @@ impl Index {
                             }
                         }
 
-                        block_response_map.insert(
-                            tweak_data.txid.to_string(),
-                            serde_json::Value::Object(tx_response_map),
-                        );
+                        if at_least_one_unspent {
+                            block_response_map.insert(
+                                tweak_data.txid.to_string(),
+                                serde_json::Value::Object(tx_response_map),
+                            );
+                        }
                     }
 
-                    map.insert(
-                        tweak_block_data.block_height.to_string(),
-                        serde_json::Value::Object(block_response_map),
-                    );
-
-                    Some(())
+                    if !block_response_map.is_empty() {
+                        map.insert(
+                            tweak_block_data.block_height.to_string(),
+                            serde_json::Value::Object(block_response_map),
+                        );
+                    }
+                    if !map.is_empty() {
+                        Some(())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }

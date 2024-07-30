@@ -228,9 +228,12 @@ impl Rpc {
         };
 
         for h in scan_height..=scan_height + count {
-            let value = self
-                .tracker
-                .get_tweaks(&self.daemon, h, historical.unwrap_or(false));
+            let value = self.tracker.get_tweaks(
+                &self.daemon,
+                h,
+                historical.unwrap_or(false),
+                self.sp_min_dust.unwrap_or(546).try_into().unwrap(),
+            );
             let tweaks = value.as_object();
             if let Some(tweaks) = tweaks {
                 if tweaks.is_empty() {

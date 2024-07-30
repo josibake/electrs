@@ -144,7 +144,8 @@ impl Tracker {
         daemon: &Daemon,
         height: usize,
         historical: bool,
+        min_dust: u64,
     ) -> serde_json::Value {
-        self.index.get_tweaks(daemon, height, historical)
+        self.index.get_tweaks(daemon, height, historical, min_dust)
     }
 }
