@@ -614,6 +614,14 @@ fn scan_single_block_for_silent_payments(
                 let prev_txid = i.previous_output.txid;
                 let prev_vout = i.previous_output.vout;
 
+                // Collect outpoints from all of the inputs, not just the silent payment eligible
+                // inputs. This is relevant for transactions that have a mix of silent payments
+                // eligible and non-eligible inputs, where the smallest outpoint is for one of the
+                // non-eligible inputs
+                outpoints
+                    .lock()
+                    .unwrap()
+                    .push((prev_txid.to_string(), prev_vout));
                 let prev_tx = self.daemon.get_transaction(&prev_txid, None).ok();
                 let prevout: Option<bitcoin::TxOut> = prev_tx.and_then(|prev_tx| {
                     let index: Option<usize> = prev_vout.try_into().ok();
@@ -626,13 +634,7 @@ fn scan_single_block_for_silent_payments(
                         &i.witness.to_vec(),
                         prevout.script_pubkey.as_bytes(),
                     ) {
-                        Ok(Some(pubkey)) => {
-                            outpoints
-                                .lock()
-                                .unwrap()
-                                .push((prev_txid.to_string(), prev_vout));
-                            pubkeys.lock().unwrap().push(pubkey)
-                        }
+                        Ok(Some(pubkey)) => pubkeys.lock().unwrap().push(pubkey),
                         Ok(None) => (),
                         Err(_) => {}
                     }
