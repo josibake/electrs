@@ -279,6 +279,7 @@ impl Index {
 
                     for tweak_data in tweak_block_data.tx_data {
                         let mut tx_response_map = serde_json::Map::new();
+                        let mut send_tweak_data = false;
 
                         tx_response_map.insert(
                             "tweak".to_string(),
@@ -295,6 +296,14 @@ impl Index {
                                     let mut is_unspent = false;
 
                                     if !historical {
+                                        // TODO: probably a faster way to do this, considering
+                                        // every client call is going to be doing the same utxo
+                                        // lookups over and over again, which is likely putting the
+                                        // server under too much load.
+                                        //
+                                        // since utxos only update every ~10 mins on average, seems
+                                        // better to update spent vs unspent directly in the
+                                        // database after a new block arrives
                                         let unspent_response = daemon
                                             .get_tx_out(&tweak_data.txid, vout.vout)
                                             .ok()
@@ -303,6 +312,7 @@ impl Index {
                                     }
 
                                     if historical || is_unspent {
+                                        send_tweak_data = true;
                                         vout_map.insert(
                                             vout.vout.to_string(),
                                             serde_json::Value::Array(vec![
@@ -319,16 +329,20 @@ impl Index {
                             }
                         }
 
-                        block_response_map.insert(
-                            tweak_data.txid.to_string(),
-                            serde_json::Value::Object(tx_response_map),
-                        );
+                        if send_tweak_data {
+                            block_response_map.insert(
+                                tweak_data.txid.to_string(),
+                                serde_json::Value::Object(tx_response_map),
+                            );
+                        }
                     }
 
-                    map.insert(
-                        tweak_block_data.block_height.to_string(),
-                        serde_json::Value::Object(block_response_map),
-                    );
+                    if !block_response_map.is_empty() {
+                        map.insert(
+                            tweak_block_data.block_height.to_string(),
+                            serde_json::Value::Object(block_response_map),
+                        );
+                    }
 
                     Some(())
                 } else {
