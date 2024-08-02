@@ -1,3 +1,4 @@
+use bitcoin::consensus::serialize;
 use clap::Parser;
 use libbitcoinkernel_sys::{
     BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
@@ -6,7 +7,8 @@ use libbitcoinkernel_sys::{
 use rayon::prelude::*;
 use std::path::PathBuf;
 
-use electrs::db::{DBStore, WriteBatch};
+use bitcoin_slices::{bsl, Visit};
+use electrs::db::{DBStore, Row, WriteBatch};
 use electrs::index::scan_single_block_for_silent_payments_without_daemon;
 use electrs::kernel::{create_context, setup_logging};
 use log::info;
@@ -75,18 +77,29 @@ fn main() {
         .for_each(|chunk| {
             info!("indexing blocks {:?} to {:?}", chunk.first(), chunk.last(),);
             let mut batch = WriteBatch::default();
-            chunk.par_iter().for_each(|&height| {
-                let block_index = chainman.get_block_index_by_height(height).unwrap();
-                let raw_block: Vec<u8> = chainman.read_block_data(&block_index).unwrap().into();
-                let undo = chainman.read_undo_data(&block_index).unwrap();
-                scan_single_block_for_silent_payments_without_daemon(
-                    height as usize,
-                    raw_block,
-                    undo,
-                    &mut batch,
-                    546,
-                );
-            });
+            let results: Vec<Row> = chunk
+                .par_iter()
+                .map(|&height| {
+                    let block_index = chainman.get_block_index_by_height(height).unwrap();
+                    let raw_block: Vec<u8> = chainman.read_block_data(&block_index).unwrap().into();
+                    let undo = chainman.read_undo_data(&block_index).unwrap();
+                    scan_single_block_for_silent_payments_without_daemon(
+                        height as usize,
+                        raw_block,
+                        undo,
+                        546,
+                    )
+                })
+                .collect();
+            let block_index = chainman
+                .get_block_index_by_height(*chunk.last().unwrap())
+                .unwrap();
+            let last_block: Vec<u8> = chainman.read_block_data(&block_index).unwrap().into();
+            let block =
+                bsl::Block::visit(&last_block, &mut bitcoin_slices::EmptyVisitor {}).unwrap();
+            let block_hash = block.parsed().block_hash();
+            batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+            batch.tweak_rows = results;
             store.write(&batch);
         });
 }

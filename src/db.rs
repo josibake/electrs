@@ -4,17 +4,17 @@ use electrs_rocksdb as rocksdb;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) type Row = Box<[u8]>;
+pub type Row = Box<[u8]>;
 
 #[derive(Default)]
 pub struct WriteBatch {
     pub(crate) tip_row: Row,
-    pub(crate) sp_tip_row: Row,
+    pub sp_tip_row: Row,
     pub(crate) header_rows: Vec<Row>,
     pub(crate) funding_rows: Vec<Row>,
     pub(crate) spending_rows: Vec<Row>,
     pub(crate) txid_rows: Vec<Row>,
-    pub(crate) tweak_rows: Vec<Row>,
+    pub tweak_rows: Vec<Row>,
 }
 
 impl WriteBatch {

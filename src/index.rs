@@ -646,9 +646,8 @@ pub fn scan_single_block_for_silent_payments_without_daemon(
     block_height: usize,
     block: SerBlock,
     undo: BlockUndo,
-    batch: &mut WriteBatch,
     min_dust: u64,
-) {
+) -> Row {
     struct IndexBlockVisitor<'a> {
         min_dust: u64,
         tweak_block_data: &'a mut TweakBlockData,
@@ -755,8 +754,6 @@ pub fn scan_single_block_for_silent_payments_without_daemon(
         tx_num: 0,
         undo_block_data: undo,
     };
-    let block = bsl::Block::visit(&block, &mut index_block).unwrap();
-    let block_hash = block.parsed().block_hash();
-    batch.tweak_rows.push(tweak_block_data.into_boxed_slice());
-    batch.sp_tip_row = serialize(&block_hash).into_boxed_slice();
+    let _block = bsl::Block::visit(&block, &mut index_block).unwrap();
+    tweak_block_data.into_boxed_slice()
 }
