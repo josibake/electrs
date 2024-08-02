@@ -185,7 +185,12 @@ impl Index {
         sp_skip_height: Option<usize>,
     ) -> Result<bool> {
         let mut start = 0;
-        let initial_height = sp_begin_height.unwrap_or(70_000);
+        // Taproot activates around 709,000 and Silent Payments start appearing > 800,000
+        // These numbers are specific to mainnet, for regtest/testnet/signet, sp_begin_height
+        // should be specified
+        //
+        // TODO: make 800_000 a constant whose value network specific
+        let initial_height = sp_begin_height.unwrap_or(800_000);
 
         if let Some(sp_skip_height) = sp_skip_height {
             start = sp_skip_height;
@@ -223,10 +228,6 @@ impl Index {
             } else {
                 start = initial_height;
             }
-        }
-
-        if start == initial_height {
-            panic!("start height is the same as initial height");
         }
 
         let new_header = self
